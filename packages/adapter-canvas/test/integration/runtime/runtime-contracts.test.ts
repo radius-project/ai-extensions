@@ -1612,6 +1612,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     "refresh cancelled",
     "refresh refused",
     "refresh selection changed",
+    "refresh no node",
     "invalid",
     "cancel",
     "stale",
@@ -1630,6 +1631,9 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       const stage = resolve(".radius", ".staging-managed-test");
       const node = resolve("test", "bin", "node");
       const skillBase = resolve("test", "skills", "radius-app-bicep");
+      const stopInstruction = "Stop and ask the user to install Node.js.";
+      let nodeAvailable =
+        outcome !== "no node" && outcome !== "refresh no node";
       let revision = outcome === "missing revision" ? "" : "saved-source-1";
       const artifact = vi.fn((name: string) => join(stage, name));
       const cancel = vi.fn();
@@ -1673,7 +1677,8 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
               JSON.stringify({
                 skill: "radius-app-bicep",
                 skillBase,
-                nodeCommand: outcome === "no node" ? null : node
+                nodeCommand: nodeAvailable ? node : null,
+                instruction: nodeAvailable ? "Run the skill." : stopInstruction
               })
             );
           deps.beginManagedModel = () => ({
@@ -1748,6 +1753,23 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           return;
         }
         await handoff(request);
+        if (outcome === "refresh no node") {
+          expect(harness.session.send).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({
+              prompt: expect.stringContaining(stopInstruction)
+            })
+          );
+          expect(harness.session.send).not.toHaveBeenCalledWith(
+            expect.objectContaining({
+              prompt: expect.stringContaining("managedAuthoring")
+            })
+          );
+          expect(state.appModelAttemptTokens).toEqual({});
+          expect(state.appBicepHandoffKey).toBeUndefined();
+          nodeAvailable = true;
+          await handoff(request);
+          expect(harness.session.send).toHaveBeenCalledTimes(2);
+        }
         const requestToken =
           state.appModelAttemptTokens?.["acme/widgets::main"];
         expect(requestToken).toBeTruthy();
@@ -1808,7 +1830,11 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
             "source or worktree changed"
           );
           expect(harness.deps.rad.runRadBicepPublish).not.toHaveBeenCalled();
-        } else if (outcome === "complete" || outcome === "refresh") {
+        } else if (
+          outcome === "complete" ||
+          outcome === "refresh" ||
+          outcome === "refresh no node"
+        ) {
           await expect(
             tool("radius_publish_custom_type_extension").handler({})
           ).resolves.toContain("active managed");
