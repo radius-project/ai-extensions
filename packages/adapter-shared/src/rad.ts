@@ -80,6 +80,7 @@ export type Logger = (message: string) => void;
 
 interface SpawnManagedRadOptions extends SpawnRadOptions {
   log?: Logger;
+  prepareSpawn?: () => Promise<void>;
   beforeSpawn?: () => void;
 }
 
@@ -182,6 +183,7 @@ export interface RunRadBicepPublishExtensionOptions {
   target: string;
   log?: Logger;
   timeout?: number;
+  prepareSpawn?: () => Promise<void>;
   beforeSpawn?: () => void;
 }
 
@@ -192,6 +194,7 @@ export interface RunRadBicepPublishOptions {
   env?: NodeJS.ProcessEnv;
   log?: Logger;
   timeout?: number;
+  prepareSpawn?: () => Promise<void>;
   beforeSpawn?: () => void;
 }
 
@@ -460,7 +463,7 @@ function readRadBinaryIdentity(
       resolve(value);
     };
     const timer = setTimeout(() => {
-      killChildTree(child);
+      void killChildTree(child);
       finish(null);
     }, timeout);
 
@@ -996,10 +999,12 @@ async function spawnManagedRad(
     timeout = 120000,
     label = "rad",
     log = noop,
+    prepareSpawn,
     beforeSpawn
   }: SpawnManagedRadOptions = {}
 ): Promise<ProcessResult> {
   const radPath = await ensureRadBinary({ log });
+  if (prepareSpawn) await prepareSpawn();
   beforeSpawn?.();
   return await spawnRad(radPath, args, {
     cwd,
@@ -1044,6 +1049,7 @@ export async function runRadBicepPublishExtension({
   target,
   log = noop,
   timeout = 120000,
+  prepareSpawn,
   beforeSpawn
 }: RunRadBicepPublishExtensionOptions): Promise<string> {
   const from = path.resolve(fromFile);
@@ -1054,6 +1060,7 @@ export async function runRadBicepPublishExtension({
       timeout,
       label: "rad bicep publish-extension",
       log,
+      prepareSpawn,
       beforeSpawn
     });
     return to;
@@ -1080,6 +1087,7 @@ export async function runRadBicepPublish({
   env = {},
   log = noop,
   timeout = 120000,
+  prepareSpawn,
   beforeSpawn
 }: RunRadBicepPublishOptions): Promise<string> {
   const src = path.resolve(file);
@@ -1090,6 +1098,7 @@ export async function runRadBicepPublish({
       timeout,
       label: "rad bicep publish",
       log,
+      prepareSpawn,
       beforeSpawn
     });
     return target;
@@ -1227,7 +1236,7 @@ export async function runRadAppGraph(
         settled = true;
         if (graceTimer) clearTimeout(graceTimer);
         if (artifactTimer) clearInterval(artifactTimer);
-        killChildTree(child, processPlatform);
+        void killChildTree(child, processPlatform);
         reject(
           new RadProcessError(
             `rad app graph timed out after ${timeout}ms`,
@@ -1296,7 +1305,7 @@ export async function runRadAppGraph(
             return;
           }
           complete();
-          killChildTree(child, processPlatform);
+          void killChildTree(child, processPlatform);
           resolve();
         }, artifactPollIntervalMs);
       }

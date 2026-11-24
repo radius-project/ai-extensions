@@ -11,7 +11,11 @@ export interface AppPublicationPorts {
   stagingPrefix(workspace: WorkspacePath, input: unknown): string;
   validateRegistryTarget(target: unknown, repo: WorkspacePath): string | null;
   exists(path: string): boolean;
-  compileExtension(fromFile: string, target: string): Promise<unknown>;
+  compileExtension(
+    fromFile: string,
+    target: string,
+    workspace: WorkspacePath
+  ): Promise<unknown>;
   publishRecipe(
     file: string,
     target: string,
@@ -61,7 +65,7 @@ export function createAppPublication(ports: AppPublicationPorts) {
         `.radius/${prefix}custom-types.tgz`
       );
       if (!ports.exists(from)) return { kind: "missing", path: from } as const;
-      await ports.compileExtension(from, target);
+      await ports.compileExtension(from, target, workspace);
       return { kind: "compiled", target } as const;
     },
     async publishRecipe(

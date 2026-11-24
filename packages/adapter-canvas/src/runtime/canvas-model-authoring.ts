@@ -88,16 +88,16 @@ export function createCanvasModelAuthoring(
           sourceRevision: revision
         },
         current,
-        async (appFile) => {
+        async (appFile, signal) => {
           try {
-            await deps.process.execFile(
+            await deps.process.runValidator(
               node,
               [
                 join(skillBase, "scripts", "validate-bicep.mjs"),
                 appFile,
                 "--managed-final"
               ],
-              { cwd: workspace, encoding: "utf8", timeout: 120_000 }
+              { cwd: workspace, timeout: 120_000, signal }
             );
           } catch (error) {
             const stderr =

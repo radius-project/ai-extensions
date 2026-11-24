@@ -409,6 +409,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       })
     },
     process: {
+      runValidator: vi.fn(async () => ({ stdout: "", stderr: "" })),
       existsSync: vi.fn(() => true),
       execFile: vi.fn(async () => ({ stdout: "", stderr: "" }))
     },

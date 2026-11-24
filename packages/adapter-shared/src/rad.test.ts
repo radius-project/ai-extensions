@@ -2544,21 +2544,26 @@ describe("managed Bicep publishing", () => {
     vi.resetModules();
     const mod = await import("./rad.js");
     writeManagedBicepStub();
-    let cancelled = false;
+    let prepared = 0;
+    const prepareSpawn = async () => {
+      await Promise.resolve();
+      prepared++;
+    };
     const beforeSpawn = () => {
-      if (cancelled) throw new Error("request cancelled");
+      if (prepared) throw new Error("request cancelled after preparation");
     };
     const compilation = mod.runRadBicepPublishExtension({
       fromFile: path.join(root, "manifest.yaml"),
       target: path.join(root, "extension.tgz"),
+      prepareSpawn,
       beforeSpawn
     });
     const publication = mod.runRadBicepPublish({
       file: path.join(root, "recipe.bicep"),
       target: "br:registry.invalid/acme/recipe:v1",
+      prepareSpawn,
       beforeSpawn
     });
-    cancelled = true;
 
     for (const result of await Promise.allSettled([compilation, publication])) {
       expect(result).toMatchObject({
@@ -2566,6 +2571,7 @@ describe("managed Bicep publishing", () => {
         reason: { message: expect.stringContaining("request cancelled") }
       });
     }
+    expect(prepared).toBe(2);
     expect(fs.existsSync(invocation)).toBe(false);
   });
 

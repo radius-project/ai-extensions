@@ -97,6 +97,7 @@ export interface RadDependencies {
     fromFile: string;
     target: string;
     log?: (message: string) => void;
+    prepareSpawn?: () => Promise<void>;
     beforeSpawn?: () => void;
   }): Promise<unknown>;
   runRadBicepPublish(options: {
@@ -104,6 +105,7 @@ export interface RadDependencies {
     target: string;
     env?: Record<string, string>;
     log?: (message: string) => void;
+    prepareSpawn?: () => Promise<void>;
     beforeSpawn?: () => void;
   }): Promise<unknown>;
 }
@@ -224,6 +226,11 @@ export interface HostCallbackDependencies {
 
 export interface ProcessDependencies {
   existsSync(path: string): boolean;
+  runValidator(
+    cmd: string,
+    args: string[],
+    options: { cwd: string; timeout: number; signal: AbortSignal }
+  ): Promise<{ stdout: string; stderr: string }>;
   execFile(
     cmd: string,
     args: string[],
