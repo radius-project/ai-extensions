@@ -1,9 +1,13 @@
 import {
   deleteApplication,
+  DELETE_APP_DISPATCHER_FILE,
   type ApplicationDeletionDispatch,
   type ApplicationDeletionResult
 } from "@radius-project/core";
-import { dispatchApplicationDelete } from "@radius-project/adapter-shared";
+import {
+  dispatchApplicationDelete,
+  type ApplicationDeleteDispatchIdentity
+} from "@radius-project/adapter-shared";
 import type { DeploymentsDependencies } from "../routes/deployments.js";
 import { redactGhCredentials } from "../../gh.js";
 
@@ -27,6 +31,7 @@ export type ApplicationDeletionDependencies = Pick<
   | "deleteApplicationWorkflowFiles"
   | "findWorkflowRun"
   | "runGh"
+  | "workflowAdmission"
   | "readProcessEnv"
   | "setTimer"
   | "logError"
@@ -37,6 +42,7 @@ export async function requestApplicationDeletion(
   dependencies: ApplicationDeletionDependencies,
   instanceId?: string,
   guarded?: {
+    captureIdentity?(identity: ApplicationDeleteDispatchIdentity): void;
     observe(
       dispatch: Exclude<ApplicationDeletionDispatch, { kind: "refused" }>,
       release: () => void
@@ -163,8 +169,10 @@ export async function requestApplicationDeletion(
           instanceId,
           selection
         ),
-      dispatch: (request) =>
-        dispatchApplicationDelete(request, {
+      dispatch: (request) => {
+        const admission = guarded ? undefined : dependencies.workflowAdmission;
+        let captured: ApplicationDeleteDispatchIdentity | undefined;
+        return dispatchApplicationDelete(request, {
           id: dependencies.id,
           now: Date.now,
           ghCommandPresentation: dependencies.ghCommandPresentation,
@@ -172,14 +180,51 @@ export async function requestApplicationDeletion(
           deleteApplicationWorkflowFiles:
             dependencies.deleteApplicationWorkflowFiles,
           findWorkflowRun: dependencies.findWorkflowRun,
-          runGh: dependencies.runGh,
+          runGh:
+            admission ?
+              async (args, timeout) => {
+                if (!captured)
+                  throw new Error(
+                    "Cannot identify the pending Canvas deletion."
+                  );
+                const lease = await admission.acquire({
+                  ...captured,
+                  repo: request.repo,
+                  environment: request.environment,
+                  application: request.application,
+                  workflowFile: DELETE_APP_DISPATCHER_FILE,
+                  branch: ""
+                });
+                if (!lease)
+                  throw new Error(
+                    "Another deployment or deletion holds admission for this environment."
+                  );
+                // The CLI has no structured pre-spawn rejection. Keep the
+                // record for exact reconciliation on the next attempt.
+                try {
+                  return await dependencies.runGh(
+                    [...args.slice(0, -1), `github.com/${request.repo}`],
+                    timeout
+                  );
+                } catch {
+                  return { code: 1, stdout: "", stderr: "", timedOut: true };
+                }
+              }
+            : dependencies.runGh,
+          captureGuardedIdentity:
+            admission ?
+              (identity) => {
+                captured = identity;
+              }
+            : guarded?.captureIdentity,
           readProcessEnv: dependencies.readProcessEnv,
           sleep: (ms) =>
             new Promise((resolve) => {
               dependencies.setTimer(() => resolve(), ms);
             }),
-          guarded: guarded !== undefined
-        }),
+          guarded: guarded !== undefined || admission !== undefined
+        });
+      },
       invalidateListing: (repo) => dependencies.deployListCache.delete(repo),
       reportDiscoveryError: (error) => {
         const detail = error instanceof Error ? error.message : String(error);

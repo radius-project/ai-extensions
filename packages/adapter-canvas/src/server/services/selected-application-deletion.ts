@@ -1,5 +1,7 @@
 import {
   createDeploymentObservationBindings,
+  exactTerminalDeploymentRun,
+  type ApplicationDeleteDispatchIdentity,
   type DeploymentCommandExecutor,
   type DeploymentObservationExecutor
 } from "@radius-project/adapter-shared";
@@ -7,7 +9,6 @@ import {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_FAILED_STATUS,
   canonicalDeletionRunUrl,
-  confirmedWorkflowConclusion,
   deploymentIdentityRefusal,
   probeDeleteConflict,
   deploymentRunId,
@@ -53,6 +54,19 @@ export interface PrepareApplicationDeletionInput {
   isCurrent(): boolean;
 }
 
+export interface GuardedDeletionAdmission {
+  acquire(input: {
+    executor: SelectedGhExecutor;
+    target: ApplicationDeletionRequest;
+    approvedRunId: number;
+    dispatch: ApplicationDeleteDispatchIdentity;
+    assertCurrent(): void;
+  }): Promise<{
+    repositoryId: number;
+    release(): Promise<void>;
+  }>;
+}
+
 export function createSelectedApplicationDeletion(ports: {
   createExecutor(login: string): Promise<SelectedGhExecutor>;
   createLookup(
@@ -60,6 +74,7 @@ export function createSelectedApplicationDeletion(ports: {
   ): Pick<ApplicationDeletionDependencies, "resolveEnvDeployment">;
   deletion: ApplicationDeletionDependencies;
   awsEnabled: boolean;
+  admission?: GuardedDeletionAdmission;
 }) {
   return async function prepare({
     login,
@@ -180,6 +195,9 @@ export function createSelectedApplicationDeletion(ports: {
           reads.createDeployStatusReader
         );
         let verified: { branch: string; sha: string } | undefined;
+        let dispatchIdentity: ApplicationDeleteDispatchIdentity | undefined;
+        let persisted:
+          Awaited<ReturnType<GuardedDeletionAdmission["acquire"]>> | undefined;
         try {
           return await requestApplicationDeletion(
             approvedTarget,
@@ -317,6 +335,7 @@ export function createSelectedApplicationDeletion(ports: {
                   throw new Error(
                     "The default branch changed after workflow verification. Confirm the deletion again."
                   );
+                const approvedRef = verified;
                 let admitted = false;
                 try {
                   return await executor.run(
@@ -339,6 +358,52 @@ export function createSelectedApplicationDeletion(ports: {
                             "The workspace changed before deletion."
                           );
                         assertCurrent();
+                        if (ports.admission) {
+                          if (!dispatchIdentity)
+                            throw new Error(
+                              "Could not identify the pending deletion dispatch."
+                            );
+                          persisted = await ports.admission.acquire({
+                            executor,
+                            target: approvedTarget,
+                            approvedRunId: approvedRun,
+                            dispatch: dispatchIdentity,
+                            assertCurrent
+                          });
+                          try {
+                            if (
+                              (await readApplicationDeletionHistory(
+                                executor,
+                                historyTarget,
+                                assertCurrent
+                              )) !== approvedHistory ||
+                              (await selectedGetDefaultBranch(
+                                executor,
+                                repo
+                              )) !== approvedRef.branch ||
+                              (await selectedGetBranchHeadSha(
+                                executor,
+                                repo,
+                                approvedRef.branch
+                              )) !== approvedRef.sha
+                            )
+                              throw new Error(
+                                "GitHub state changed while reserving deletion. Confirm the deletion again."
+                              );
+                            if (
+                              validateWorkspace &&
+                              !(await validateWorkspace())
+                            )
+                              throw new Error(
+                                "The workspace changed before deletion."
+                              );
+                            assertCurrent();
+                          } catch (error) {
+                            await persisted.release();
+                            persisted = undefined;
+                            throw error;
+                          }
+                        }
                         admitted = true;
                       }
                     }
@@ -363,6 +428,9 @@ export function createSelectedApplicationDeletion(ports: {
             },
             undefined,
             {
+              captureIdentity(identity) {
+                dispatchIdentity = identity;
+              },
               observe(dispatch, release) {
                 const { discoverRunUrl } = dispatch;
                 if (!discoverRunUrl) return;
@@ -386,33 +454,19 @@ export function createSelectedApplicationDeletion(ports: {
                         const run: unknown = JSON.parse(result.stdout);
                         if (
                           isCurrent() &&
-                          run &&
-                          typeof run === "object" &&
-                          "id" in run &&
-                          run.id === runId &&
-                          "repository" in run &&
-                          run.repository &&
-                          typeof run.repository === "object" &&
-                          "full_name" in run.repository &&
-                          typeof run.repository.full_name === "string" &&
-                          run.repository.full_name.toLowerCase() ===
-                            approvedTarget.repo.toLowerCase() &&
-                          "run_attempt" in run &&
-                          run.run_attempt === 1 &&
-                          "event" in run &&
-                          run.event === "workflow_dispatch" &&
-                          "path" in run &&
-                          run.path ===
-                            `.github/workflows/${DELETE_APP_DISPATCHER_FILE}` &&
-                          "status" in run &&
-                          typeof run.status === "string" &&
-                          "conclusion" in run &&
-                          typeof run.conclusion === "string" &&
-                          confirmedWorkflowConclusion({
-                            status: run.status,
-                            conclusion: run.conclusion
+                          exactTerminalDeploymentRun(run, {
+                            repo: approvedTarget.repo,
+                            runId,
+                            workflow: DELETE_APP_DISPATCHER_FILE,
+                            ...(persisted && dispatchIdentity ?
+                              {
+                                repositoryId: persisted.repositoryId,
+                                title: `Radius - Delete ${approvedTarget.environment} [radius:v1 app=${approvedTarget.application}] ${dispatchIdentity.correlation}`
+                              }
+                            : {})
                           })
                         ) {
+                          await persisted?.release();
                           release();
                           return;
                         }

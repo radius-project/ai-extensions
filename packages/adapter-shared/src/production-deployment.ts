@@ -27,7 +27,11 @@ import {
 } from "./runtime-deployment.js";
 import { createDeploymentRepository } from "./deployment-repository.js";
 import type { DeploymentCommandExecutor } from "./deployment-command-bindings.js";
-import type { DeployCommandResult } from "./deployment-dispatch.js";
+import {
+  createDeployDispatchService,
+  type DeployAdmissionPort,
+  type DeployCommandResult
+} from "./deployment-dispatch.js";
 import { createDeploymentWorkflows } from "./deployment-workflows.js";
 import { createDeploymentLookup } from "./deployment-lookup.js";
 import { createDeploymentIdentityReader } from "./deployment-identity.js";
@@ -46,13 +50,13 @@ import {
 } from "./deployment-workspace.js";
 import { resolveDeployParams } from "./deployment-parameters.js";
 import { createWorkflowObservationScope } from "./workflow-observation-scope.js";
-import { createDeployDispatchService } from "./deployment-dispatch.js";
 import { createDeployMonitorService } from "./deployment-monitor.js";
 import { createDeployOutcomeService } from "./deployment-outcome.js";
 import { assertDeployDependencies } from "./deployment-service-dependencies.js";
 
 export interface ProductionDeploymentPorts {
   awsEnabled: boolean;
+  admission?: DeployAdmissionPort;
   execute: DeploymentObservationExecutor & DeploymentCommandExecutor;
   ghCommandPresentation?: GhCommandPresentation;
   readProcessEnv(): NodeJS.ProcessEnv;
@@ -179,6 +183,7 @@ export function createProductionDeploymentRuntime(
       });
       const dispatch = createDeployDispatchService({
         id: ports.id,
+        admission: ports.admission,
         ghCommandPresentation: ports.ghCommandPresentation,
         deployWorkflowFile: DEPLOY_DISPATCHER_FILE,
         deployWorkflowFiles: workflows.files,

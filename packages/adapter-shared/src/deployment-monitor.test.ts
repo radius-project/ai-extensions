@@ -1852,6 +1852,80 @@ describe("deploy monitor progress streaming", () => {
 });
 
 describe("deploy monitor settlement", () => {
+  it("keeps normal workflow settlement when the admission owner cannot verify its candidate", async () => {
+    const lease = {
+      settle: vi.fn(async () => {
+        throw new Error("Independent verification unavailable");
+      })
+    };
+    const outcome = settleRecorder();
+    const { request: input, logs } = request();
+    const service = createDeployMonitorService(
+      dependencies({
+        plannedGraph: undefined,
+        dispatch: {
+          prepareAndDispatch: async () => ({
+            dispatched: true,
+            workflowFile: "run.yml",
+            dispatchedAt: 1,
+            environment: "production",
+            correlationId: "dep-test",
+            baselineRunId: null,
+            admissionLease: lease
+          })
+        },
+        getRunDetail: async () => completedRun(),
+        outcome: outcome.outcome
+      })
+    );
+
+    await service.run(input);
+    expect(lease.settle).toHaveBeenCalledExactlyOnceWith({
+      kind: "terminal-candidate",
+      runId: 77,
+      conclusion: "success"
+    });
+    expect(outcome.calls).toHaveLength(1);
+    expect(logs).toContain(
+      "⚠ Could not settle persistent deployment admission."
+    );
+  });
+
+  it.each(["ambiguous", "unsupported", "uncorrelated"])(
+    "does not signal terminal evidence for %s observation",
+    async (evidence) => {
+      const settle = vi.fn(async () => {});
+      const outcome = settleRecorder();
+      const service = createDeployMonitorService(
+        dependencies({
+          plannedGraph: undefined,
+          dispatch: {
+            prepareAndDispatch: async () => ({
+              dispatched: true,
+              workflowFile: "run.yml",
+              dispatchedAt: 1,
+              environment: "production",
+              correlationId:
+                evidence === "uncorrelated" ? undefined : "dep-test",
+              baselineRunId: null,
+              admissionLease: { settle }
+            })
+          },
+          findWorkflowRun: async () => (evidence === "ambiguous" ? null : 77),
+          getRunDetail: async () =>
+            evidence === "unsupported" ?
+              { status: "completed", conclusion: "unexpected", steps: [] }
+            : completedRun(),
+          outcome: outcome.outcome
+        })
+      );
+
+      await service.run(request().request);
+      expect(settle).not.toHaveBeenCalled();
+      expect(outcome.calls).toHaveLength(evidence === "uncorrelated" ? 1 : 0);
+    }
+  );
+
   it("hands the terminal run to the outcome stage with its own collaborators", async () => {
     const resource: CanvasGraphResource = { id: "r1", deployStatus: "pending" };
     const settle = settleRecorder();

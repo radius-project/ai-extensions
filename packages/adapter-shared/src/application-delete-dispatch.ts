@@ -9,6 +9,11 @@ import {
   type GhCommandPresentation
 } from "@radius-project/core";
 
+export interface ApplicationDeleteDispatchIdentity {
+  correlation: string;
+  startedAt: number;
+}
+
 export interface ApplicationDeleteDispatchPorts {
   now(): number;
   id(): string;
@@ -38,6 +43,7 @@ export interface ApplicationDeleteDispatchPorts {
   readProcessEnv(): NodeJS.ProcessEnv;
   sleep(ms: number): Promise<void>;
   guarded?: boolean;
+  captureGuardedIdentity?(identity: ApplicationDeleteDispatchIdentity): void;
 }
 
 interface CommandResult {
@@ -158,6 +164,10 @@ export async function dispatchApplicationDelete(
     "--repo",
     repo
   ];
+  dependencies.captureGuardedIdentity?.({
+    correlation: correlationId,
+    startedAt: dispatchedAt
+  });
   let dispatch: CommandResult = { code: 1, stdout: "", stderr: "" };
   // A `force` dispatch also has to survive the *input-schema* race: the
   // dispatcher that was just committed or updated declares the `force` input,

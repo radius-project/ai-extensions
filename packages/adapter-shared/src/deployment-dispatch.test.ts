@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildFederatedCredentialListArgs,
   createDeployDispatchService,
@@ -227,6 +227,113 @@ const PUBLIC_PARAM: BicepParam = {
   default: "8080",
   description: ""
 };
+
+describe("persistent deploy admission", () => {
+  it.each(["occupied", "unavailable"])(
+    "does not invoke dispatch when admission is %s",
+    async (reason) => {
+      const { input, state } = request();
+      const runGh = vi.fn(async () => OK);
+      const service = createDeployDispatchService(
+        dependencies({
+          runGh,
+          admission: {
+            acquire: async () => {
+              if (reason === "unavailable")
+                throw new Error("Cannot read admission");
+              return null;
+            }
+          }
+        })
+      );
+
+      expect(await service.prepareAndDispatch(input)).toEqual({
+        dispatched: false
+      });
+      expect(runGh).not.toHaveBeenCalled();
+      expect(state.deployErrorKind).toBe("run-unconfirmed");
+      expect(state.deployError).toContain("No workflow was dispatched.");
+    }
+  );
+
+  it("reports proven no-spawn if the invocation was stopped during acquisition", async () => {
+    let active = true;
+    const { input } = request();
+    const settle = vi.fn(async () => {});
+    const runGh = vi.fn(async () => OK);
+    const service = createDeployDispatchService(
+      dependencies({
+        runGh,
+        admission: {
+          acquire: async () => {
+            active = false;
+            return { settle };
+          }
+        }
+      })
+    );
+
+    await expect(
+      service.prepareAndDispatch({ ...input, isCurrent: () => active })
+    ).rejects.toMatchObject({ reason: "cancelled" });
+    expect(settle).toHaveBeenCalledExactlyOnceWith({ kind: "no-spawn" });
+    expect(runGh).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { code: 1, stderr: "HTTP 404: not found", stdout: "" },
+    {
+      code: 1,
+      stderr: "HTTP 403: Resource not accessible by integration",
+      stdout: ""
+    },
+    { code: 1, stderr: "", stdout: "", timedOut: true }
+  ])(
+    "holds admission after a nonzero command exit without resending: $stderr",
+    async (result) => {
+      const { input, state } = request();
+      const settle = vi.fn(async () => {});
+      const runGh = vi.fn(async () => result);
+      const service = createDeployDispatchService(
+        dependencies({
+          runGh,
+          admission: { acquire: async () => ({ settle }) },
+          ensureWorkflowsCurrent: async () => ({
+            created: [".github/workflows/run-rad-commands.yml"],
+            updated: []
+          }),
+          ghCredentialSource: () => "injected",
+          readProcessEnv: () => ({ GH_TOKEN: "synthetic" })
+        })
+      );
+
+      expect(await service.prepareAndDispatch(input)).toEqual({
+        dispatched: false
+      });
+      expect(runGh).toHaveBeenCalledTimes(1);
+      expect(settle).not.toHaveBeenCalled();
+      expect(state.deployErrorKind).toBe("run-unconfirmed");
+      expect(state.deployError).toContain("Deployment admission remains held");
+    }
+  );
+
+  it("does not claim no-spawn when the executor rejects after it was invoked", async () => {
+    const { input } = request();
+    const settle = vi.fn(async () => {});
+    const service = createDeployDispatchService(
+      dependencies({
+        runGh: async () => {
+          throw new Error("Executor lost its response");
+        },
+        admission: { acquire: async () => ({ settle }) }
+      })
+    );
+    await expect(service.prepareAndDispatch(input)).rejects.toThrow(
+      "Executor lost its response"
+    );
+    expect(settle).not.toHaveBeenCalled();
+  });
+});
 
 describe("deploy dispatch construction", () => {
   it("cancels after workflow verification loses invocation authority, before reading or writing secrets", async () => {

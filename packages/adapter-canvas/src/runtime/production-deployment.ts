@@ -14,10 +14,12 @@ import { createDeploymentDelivery } from "../server/services/deployment-delivery
 export function createProductionDeploymentRuntime(options: {
   awsEnabled: boolean;
   delivery?: ProductionDeploymentPorts["delivery"];
+  admission?: ProductionDeploymentPorts["admission"];
 }) {
   const delivery = createDeploymentDelivery(options.delivery);
   const runtime = createSharedDeploymentRuntime({
     awsEnabled: options.awsEnabled,
+    admission: options.admission,
     execute: cliExec,
     ghCommandPresentation: resolveGhCommandPresentation(),
     readProcessEnv: () => process.env,

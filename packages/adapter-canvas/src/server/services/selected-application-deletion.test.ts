@@ -1,10 +1,14 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createDeploymentAdmissionStore } from "@radius-project/adapter-shared";
 import { describe, expect, it, vi } from "vitest";
 import type { SelectedGhExecutor } from "../../gh.js";
 import { generateDeleteWorkflow } from "../../infra.js";
 import { createApplicationDeletionTool } from "../../runtime/application-deletion-tool.js";
 import type { ApplicationDeletionDependencies } from "./application-deletion.js";
+import { createGuardedDeletionAdmission } from "./guarded-deletion-admission.js";
 import { createSelectedApplicationDeletion } from "./selected-application-deletion.js";
 
 const request = {
@@ -34,7 +38,17 @@ async function fixture({
   forceArtifact = false,
   dispatcherEnvironment = "dev",
   lookupCommand = "gh",
-  provider = "azure"
+  provider = "azure",
+  admission
+}: {
+  force?: boolean;
+  forceArtifact?: boolean;
+  dispatcherEnvironment?: string;
+  lookupCommand?: string;
+  provider?: string;
+  admission?: Parameters<
+    typeof createSelectedApplicationDeletion
+  >[0]["admission"];
 } = {}) {
   const templates = await generateDeleteWorkflow(dispatcherEnvironment, {
     readTemplate: async (_repo, path) =>
@@ -83,6 +97,8 @@ async function fixture({
       return ok("[]");
     }
     const path = args[1];
+    if (path === "/repos/octo/app" && admission && args.length === 2)
+      return ok(JSON.stringify({ id: 72, full_name: "octo/app" }));
     if (path === historyPath) return ok(JSON.stringify([{ id: headId }]));
     if (path === statusPath)
       return ok(
@@ -171,6 +187,7 @@ async function fixture({
     createExecutor,
     awsEnabled: false,
     deletion,
+    admission,
     createLookup: (execute) => ({
       async resolveEnvDeployment() {
         const read = await new Promise<string>((resolve, reject) =>
@@ -420,6 +437,142 @@ describe("selected application deletion", () => {
       expect(f.createExecutor).not.toHaveBeenCalled();
     }
   );
+
+  it("does not spawn the workflow when persistent admission refuses", async () => {
+    const acquire = vi.fn(async () => {
+      throw new Error("Another operation owns the durable admission.");
+    });
+    const f = await fixture({ admission: { acquire } });
+    const prepared = await f.prepare();
+    await expect(prepared.execute()).resolves.toMatchObject({
+      body: { error: expect.stringContaining("owns the durable admission") }
+    });
+    expect(acquire).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvedRunId: 17,
+        dispatch: { correlation: "dep-fixture", startedAt: expect.any(Number) },
+        target: expect.objectContaining({ deploymentId: "42" })
+      })
+    );
+    expect(f.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("releases the durable admission when authorization changes during persistence", async () => {
+    let current = true;
+    const release = vi.fn(async () => {});
+    const acquire = vi.fn(async () => {
+      current = false;
+      return { repositoryId: 42, release };
+    });
+    const f = await fixture({ admission: { acquire } });
+    const prepared = await f.prepare();
+    await expect(prepared.execute(async () => current)).resolves.toMatchObject({
+      body: { error: expect.stringContaining("workspace changed") }
+    });
+    expect(release).toHaveBeenCalledOnce();
+    expect(f.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("writes the exact dispatch identity before the selected CLI starts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "radius-selected-admission-"));
+    try {
+      const store = createDeploymentAdmissionStore(root);
+      const f = await fixture({
+        admission: createGuardedDeletionAdmission(store)
+      });
+      const run = f.run.getMockImplementation();
+      if (!run) throw new Error("Missing selected CLI.");
+      const key = { host: "github.com", repositoryId: 72, environment: "dev" };
+      f.run.mockImplementation(async (args, options) => {
+        if (args[0] !== "workflow") return run(args, options);
+        await options?.beforeExecute?.();
+        expect(await store.read(key)).toMatchObject({
+          record: {
+            correlation: "dep-fixture",
+            deploymentId: "42",
+            approvedRunId: 17,
+            application: "demo"
+          }
+        });
+        return ok();
+      });
+      const prepared = await f.prepare();
+      await expect(prepared.execute()).resolves.toMatchObject({ status: 200 });
+      expect(await store.read(key)).not.toBeNull();
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("recovers a prior admission only after exact selected-account terminal evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "radius-selected-admission-"));
+    try {
+      const store = createDeploymentAdmissionStore(root);
+      const key = {
+        host: "github.com",
+        repositoryId: 72,
+        environment: "dev"
+      };
+      const pending = await store.acquire(key, {
+        account: "fixture-owner",
+        application: request.application,
+        environment: request.environment,
+        correlation: "dep-prior",
+        deploymentId: "42",
+        approvedRunId: 17,
+        startedAt: Date.now()
+      });
+      if (!pending) throw new Error("Missing prior admission.");
+      const f = await fixture({
+        admission: createGuardedDeletionAdmission(store)
+      });
+      const run = f.run.getMockImplementation();
+      if (!run) throw new Error("Missing selected CLI.");
+      let repositoryId = 99;
+      f.run.mockImplementation(async (args, options) => {
+        if (args[1]?.includes("/actions/workflows/")) {
+          await options?.beforeExecute?.();
+          return ok(
+            JSON.stringify([
+              { workflow_runs: [{ id: 71, display_title: "dep-prior" }] }
+            ])
+          );
+        }
+        if (args[1] === "/repos/octo/app/actions/runs/71") {
+          await options?.beforeExecute?.();
+          return ok(
+            JSON.stringify({
+              id: 71,
+              repository: { full_name: request.repo, id: repositoryId },
+              run_attempt: 1,
+              event: "workflow_dispatch",
+              path: ".github/workflows/delete-application.yml",
+              display_title:
+                "Radius - Delete dev [radius:v1 app=demo] dep-prior",
+              status: "completed",
+              conclusion: "failure"
+            })
+          );
+        }
+        return run(args, options);
+      });
+      await expect((await f.prepare()).execute()).resolves.toMatchObject({
+        body: { error: expect.stringContaining("admission is pending") }
+      });
+      expect(await store.read(key)).toEqual(pending);
+      expect(f.dispatch).not.toHaveBeenCalled();
+      repositoryId = 72;
+      await expect((await f.prepare()).execute()).resolves.toMatchObject({
+        status: 200
+      });
+      expect(f.dispatch).toHaveBeenCalledOnce();
+      expect(await store.read(key)).toMatchObject({
+        record: { correlation: "dep-fixture" }
+      });
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
 
   it("downloads exact conflict evidence with the selected account before forced dispatch", async () => {
     const f = await fixture({ force: true, forceArtifact: true });

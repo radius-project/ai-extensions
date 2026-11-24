@@ -174,6 +174,7 @@ function start(
       | "triggerDeployRepairHandoff"
       | "triggerDeployFailureNotice"
       | "listEnvDeployment"
+      | "workflowAdmission"
     >
   > = {},
   { awsEnabled = true }: { awsEnabled?: boolean } = {}
@@ -261,6 +262,7 @@ function start(
 
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
+      workflowAdmission: callbacks.workflowAdmission,
       id: () => "fixture",
       isValidRepoSlug,
       readInstanceEntry: (instanceId) => {
@@ -2175,6 +2177,33 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       }
     }
   );
+
+  it("refuses a Canvas delete without dispatch when host-local admission is occupied", async () => {
+    const acquire = vi.fn(async () => null);
+    const harness = start({ workflowAdmission: { acquire } });
+    const entry = await container!.getOrCreate("panel-a");
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app"
+      })
+    );
+    expect(await response.json()).toMatchObject({
+      error: expect.stringContaining("holds admission")
+    });
+    expect(acquire).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repo: "octo/todo",
+        environment: "dev",
+        workflowFile: "delete-application.yml",
+        correlation: "dep-fixture"
+      })
+    );
+    expect(harness.dispatches).toEqual([]);
+  });
 
   it("dispatches the delete workflow and evicts the cached listing over a real socket", async () => {
     const harness = start();

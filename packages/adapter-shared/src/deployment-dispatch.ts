@@ -57,8 +57,40 @@ export interface DeployCommandOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+export interface DeployAdmissionRequest {
+  repo: string;
+  environment: string;
+  branch: string;
+  workflowFile: string;
+  /** The exact workflow input, including "unknown" when identity is unresolved. */
+  application: string;
+  correlation: string;
+  startedAt: number;
+}
+
+export type DeployAdmissionEvidence =
+  | { kind: "no-spawn" }
+  | { kind: "terminal-candidate"; runId: number | string; conclusion: string };
+
+export interface DeployAdmissionLease {
+  /** Fence release by lease identity. A terminal candidate is a hint, not proof. */
+  settle(evidence: DeployAdmissionEvidence): Promise<void>;
+}
+
+export interface DeployAdmissionPort {
+  /**
+   * Resolve the dispatch host and immutable repository ID, then atomically
+   * persist exclusion for that repository and environment. Null means occupied.
+   * A granted lease survives lost responses, interrupted monitoring and shutdown.
+   */
+  acquire(
+    request: Readonly<DeployAdmissionRequest>
+  ): Promise<DeployAdmissionLease | null>;
+}
+
 export interface DeployDispatchDependencies {
   id(): string;
+  admission?: DeployAdmissionPort;
   ghCommandPresentation?: GhCommandPresentation;
   // The workflow that actually runs `rad` commands, injected so the file name
   // stays owned by `server.ts`.
@@ -184,6 +216,7 @@ export type DeployDispatchOutcome =
       correlationId?: string;
       // The baseline bounds discovery; correlation identifies this execution.
       baselineRunId: number | string | null;
+      admissionLease?: DeployAdmissionLease;
     };
 
 export interface DeployDispatchService {
@@ -413,7 +446,7 @@ export function createDeployDispatchService(
     request: DeployDispatchRequest,
     environment: string,
     dispatchArgs: string[]
-  ): Promise<Record<string, string>> => {
+  ): Promise<{ secretParams: Record<string, string>; application: string }> => {
     const { entry, repo, branch, appFile, log } = request;
     entry.state.deployAppName = "";
     const bicepSource = await dependencies.fetchFileForSelection(
@@ -464,7 +497,7 @@ export function createDeployDispatchService(
         "The deployment identity title exceeds the supported 256-character budget. Shorten the environment name. No workflow was dispatched."
       );
     log("Deploying with rad commands: " + commands.join("  |  "));
-    return secretParams;
+    return { secretParams, application };
   };
 
   // Fail fast (with clear, actionable guidance) when the selected branch has
@@ -942,7 +975,7 @@ export function createDeployDispatchService(
         "-f",
         "correlation_id=" + correlationId,
         "--repo",
-        repo
+        dependencies.admission ? `github.com/${repo}` : repo
       ];
       const failPreflight = (kind: DeployErrorKind, message: string) => {
         entry.state.deployError = redactCredentials(message);
@@ -950,9 +983,9 @@ export function createDeployDispatchService(
         entry.state.deployStatus = "failed";
         log("❌ " + entry.state.deployError);
       };
-      let secretParams: Record<string, string>;
+      let prepared: Awaited<ReturnType<typeof prepareRadCommands>>;
       try {
-        secretParams = await prepareRadCommands(
+        prepared = await prepareRadCommands(
           request,
           envForDeploy,
           dispatchArgs
@@ -1020,12 +1053,12 @@ export function createDeployDispatchService(
         );
         return { dispatched: false };
       }
-      if (Object.keys(secretParams).length > 0) {
+      if (Object.keys(prepared.secretParams).length > 0) {
         try {
           const secretError = await provisionSecretParams(
             repo,
             envForDeploy,
-            secretParams,
+            prepared.secretParams,
             log,
             () => assertDispatchCurrent(request)
           );
@@ -1053,6 +1086,7 @@ export function createDeployDispatchService(
 
       let deployDispatchedAt = dependencies.now();
       let baselineRunId: number | string | null = null;
+      let admissionLease: DeployAdmissionLease | undefined;
       log(
         "🚀 Dispatching run rad commands workflow (" +
           deployWorkflowFile +
@@ -1066,10 +1100,10 @@ export function createDeployDispatchService(
         result: DeployCommandResult;
         credentialSource: "injected" | "keyring";
       }> => {
-        assertDispatchCurrent(request);
+        if (!admissionLease) assertDispatchCurrent(request);
         let result = await dependencies.runGh(dispatchArgs);
         let credentialSource = dependencies.ghCredentialSource();
-        if (result.code !== 0) {
+        if (result.code !== 0 && !admissionLease) {
           assertDispatchCurrent(request);
           const attempt = await withStrippedToken(result, (env) => {
             assertDispatchCurrent(request);
@@ -1115,10 +1149,51 @@ export function createDeployDispatchService(
         }
         assertDispatchCurrent(request);
         deployDispatchedAt = dependencies.now();
+        if (dependencies.admission) {
+          let lease: DeployAdmissionLease | null;
+          try {
+            lease = await dependencies.admission.acquire({
+              repo,
+              environment: envForDeploy,
+              branch: deployRef,
+              workflowFile: deployWorkflowFile,
+              application: prepared.application,
+              correlation: correlationId,
+              startedAt: deployDispatchedAt
+            });
+          } catch {
+            assertDispatchCurrent(request);
+            failPreflight(
+              "run-unconfirmed",
+              "Could not establish persistent deployment admission. No workflow was dispatched."
+            );
+            return { dispatched: false };
+          }
+          if (!lease) {
+            assertDispatchCurrent(request);
+            failPreflight(
+              "run-unconfirmed",
+              "Another deployment or deletion holds admission for this environment. No workflow was dispatched."
+            );
+            return { dispatched: false };
+          }
+          if (request.isCurrent?.() === false) {
+            await lease.settle({ kind: "no-spawn" });
+            throw new WorkflowReadInterruptedError("cancelled");
+          }
+          admissionLease = lease;
+        }
         const attempt = await dispatchOnce();
         dispatchDeployRes = attempt.result;
         dispatchCredentialSource = attempt.credentialSource;
-        if (dispatchDeployRes.code === 0 || dispatchDeployRes.timedOut) break;
+        // The CLI's output does not prove a request was rejected before it
+        // could create a run. Keep a single possible send per durable lease.
+        if (
+          admissionLease ||
+          dispatchDeployRes.code === 0 ||
+          dispatchDeployRes.timedOut
+        )
+          break;
         // Only the not-yet-registered race self-resolves; any other failure
         // (missing scope, Actions disabled, branch unresolved, …) will not, so
         // stop retrying and report it immediately.
@@ -1133,6 +1208,13 @@ export function createDeployDispatchService(
       if (dispatchDeployRes.code !== 0) {
         const de = redactCredentials(dispatchDeployRes.stderr || "").trim();
         log("❌ Failed to dispatch the run rad commands workflow: " + de);
+        if (admissionLease) {
+          failPreflight(
+            "run-unconfirmed",
+            "Could not confirm whether GitHub accepted the dispatch. Deployment admission remains held pending verification."
+          );
+          return { dispatched: false };
+        }
         // A "No ref found" (or unresolved ref) dispatch error means the branch
         // is not on the remote — surface the same clean, actionable "push the
         // branch" guidance. Every other dispatch failure is a run of unknown
@@ -1214,7 +1296,8 @@ export function createDeployDispatchService(
         dispatchedAt: deployDispatchedAt,
         environment: envForDeploy,
         correlationId,
-        baselineRunId
+        baselineRunId,
+        ...(admissionLease ? { admissionLease } : {})
       };
     }
   };

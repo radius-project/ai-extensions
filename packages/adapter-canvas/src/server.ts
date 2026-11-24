@@ -297,9 +297,15 @@ import {
 import { createProductionCanvasServerDependencies } from "./server/dependencies.js";
 import { createServerRouteTable } from "./server/route-table.js";
 import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
-import { createDeploymentsRoutes } from "./server/routes/deployments.js";
+import {
+  createDeploymentsRoutes,
+  type DeploymentsDependencies
+} from "./server/routes/deployments.js";
 import { probeDeleteConflict } from "./server/services/delete-conflict.js";
-import { createSelectedApplicationDeletion } from "./server/services/selected-application-deletion.js";
+import {
+  createSelectedApplicationDeletion,
+  type GuardedDeletionAdmission
+} from "./server/services/selected-application-deletion.js";
 import {
   createOperationsStatusRoutes,
   type OperationActionDependencies
@@ -5377,6 +5383,8 @@ async function preferredPortForInstance(instanceId: string): Promise<number> {
 export interface ProductionCanvasServerRuntimeOptions {
   executionOwner: EnvironmentExecutionOwner;
   deploymentRuntime: DeploymentRuntime;
+  workflowAdmission?: DeploymentsDependencies["workflowAdmission"];
+  guardedDeletionAdmission?: GuardedDeletionAdmission;
   accountContext: EnvironmentAccountContext;
   environmentOperationRunner?: EnvironmentOperationRunner;
   environmentDeletionPorts?: EnvironmentDeletionCoordinatorPorts;
@@ -5791,6 +5799,7 @@ export function createProductionCanvasServerRuntime(
     redactDiagnostic: redactGhCredentials
   });
   const deploymentsDependencies = {
+    workflowAdmission: options.workflowAdmission,
     ghCommandPresentation: GH_COMMAND_PRESENTATION,
     isValidRepoSlug,
     readInstanceEntry: (instanceId) => {
@@ -5907,6 +5916,7 @@ export function createProductionCanvasServerRuntime(
       githubAccountCoordinator.createReadOnlyExecutor(login),
     createLookup: deploymentLookupFor,
     deletion: deploymentsDependencies,
+    admission: options.guardedDeletionAdmission,
     awsEnabled
   });
 

@@ -5,7 +5,10 @@ import type { DeploymentAbandonmentService } from "../services/deployment-abando
 import type { DeployRequestService } from "../services/deploy-request.js";
 import type { DeploymentRow } from "../services/deployment-resolver.js";
 import { prepareDeploymentCleanup } from "../services/deployment-cleanup-details.js";
-import type { EnvironmentDeploymentListing } from "@radius-project/adapter-shared";
+import type {
+  EnvironmentDeploymentListing,
+  ProductionDeploymentPorts
+} from "@radius-project/adapter-shared";
 import {
   inspectDeploymentListings,
   type ApplicationDefinitionInspection
@@ -93,6 +96,7 @@ export interface DeploymentsInstanceEntry {
 }
 
 export interface DeploymentsDependencies {
+  workflowAdmission?: ProductionDeploymentPorts["admission"];
   id(): string;
   ghCommandPresentation?: GhCommandPresentation;
   isValidRepoSlug(value: unknown): boolean;

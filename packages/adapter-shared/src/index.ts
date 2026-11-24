@@ -106,6 +106,12 @@ export * from "./deployment-cleanup-marker.js";
 export * from "./deployment-identity.js";
 export * from "./deployment-owner.js";
 export {
+  deploymentAdmissionRunTitle,
+  exactTerminalDeploymentRun,
+  reconcileDeploymentAdmission
+} from "./deployment-admission-reconciliation.js";
+export { createDeploymentAdmissionStore } from "./deployment-admission-store.js";
+export {
   createDeploymentRuntime,
   type DeploymentRuntime,
   type DeploymentRuntimePorts,
@@ -122,4 +128,7 @@ export {
   inspectEnvironments,
   type EnvironmentInspectionRead
 } from "./environment-inspection.js";
-export { dispatchApplicationDelete } from "./application-delete-dispatch.js";
+export {
+  dispatchApplicationDelete,
+  type ApplicationDeleteDispatchIdentity
+} from "./application-delete-dispatch.js";

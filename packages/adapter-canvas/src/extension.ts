@@ -31,6 +31,7 @@ import {
   runRadBicepPublishExtension,
   runRadBicepPublish,
   spawnRad,
+  createDeploymentAdmissionStore,
   createDeploymentRepository,
   createGraphSourceBindings
 } from "@radius-project/adapter-shared";
@@ -44,6 +45,7 @@ import {
   getBranchHeadSha,
   getGitHubIdentity,
   resetGhIdentityCache,
+  runCommand,
   redactGhCredentials
 } from "./gh.js";
 import {
@@ -73,6 +75,8 @@ import {
 } from "./server.js";
 import { createProductionDeploymentRuntime } from "./runtime/production-deployment.js";
 import { createDeployModelSource } from "./server/services/deploy-model-source.js";
+import { createGuardedDeletionAdmission } from "./server/services/guarded-deletion-admission.js";
+import { createWorkflowAdmission } from "./server/services/workflow-admission.js";
 import {
   getSourceRefResources,
   prepareSourceRefResources,
@@ -136,7 +140,40 @@ const executionOwner = createEnvironmentExecutionOwner();
 const accountContext = createProductionGitHubAccountContext();
 const ghCommandPresentation = resolveGhCommandPresentation();
 const awsEnabled = readAwsSwitch(process.env);
-const deploymentRuntime = createProductionDeploymentRuntime({ awsEnabled });
+const deploymentAdmissionStore = createDeploymentAdmissionStore(
+  join(os.homedir(), ".radius", "ai-extensions", "deployment-admissions")
+);
+const workflowAdmission = createWorkflowAdmission(
+  deploymentAdmissionStore,
+  async (args) => {
+    if (process.env.GH_HOST && process.env.GH_HOST !== "github.com")
+      throw new Error("Durable workflow admission requires github.com.");
+    const result = await runCommand("gh", args, {
+      timeout: 10000,
+      env: { ...process.env, GH_HOST: "github.com" }
+    });
+    const parsed: unknown = JSON.parse(result);
+    return parsed;
+  },
+  async (login) => {
+    const executor =
+      await accountContext.coordinator.createReadOnlyExecutor(login);
+    await executor.verifyIdentity();
+    return async (args) => {
+      const result = await executor.run(args, { timeout: 10000 });
+      if (result.code !== 0)
+        throw new Error(
+          "Could not verify the pending workflow with its selected GitHub account."
+        );
+      const parsed: unknown = JSON.parse(result.stdout);
+      return parsed;
+    };
+  }
+);
+const deploymentRuntime = createProductionDeploymentRuntime({
+  awsEnabled,
+  admission: workflowAdmission
+});
 const graphSources = createGraphSourceBindings(graphSourceOptions(cliExec));
 const readDeploymentModel = createDeployModelSource({
   readWorkspace: fetchWorkspaceFile,
@@ -176,6 +213,10 @@ const {
   executionOwner,
   accountContext,
   deploymentRuntime,
+  workflowAdmission,
+  guardedDeletionAdmission: createGuardedDeletionAdmission(
+    deploymentAdmissionStore
+  ),
   awsEnabled
 });
 const deletionIsActive = () => !executionOwner.isShuttingDown();

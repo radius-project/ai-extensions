@@ -15,7 +15,10 @@ import {
   type DeploymentState,
   type DeploymentExecutionReference
 } from "@radius-project/core";
-import type { DeployDispatchService } from "./deployment-dispatch.js";
+import type {
+  DeployDispatchOutcome,
+  DeployDispatchService
+} from "./deployment-dispatch.js";
 import type {
   DeployOutcomeService,
   DeployOutcomeStatusReader
@@ -298,7 +301,7 @@ export function createDeployMonitorService(
       }
     }
 
-    const dispatched =
+    const dispatched: DeployDispatchOutcome =
       execution ?
         { ...execution, dispatched: true }
       : await dependencies.dispatch.prepareAndDispatch({
@@ -314,8 +317,13 @@ export function createDeployMonitorService(
         });
     assertCurrent();
     if (!dispatched.dispatched) return;
-    const { workflowFile, dispatchedAt, baselineRunId, correlationId } =
-      dispatched;
+    const {
+      workflowFile,
+      dispatchedAt,
+      baselineRunId,
+      correlationId,
+      admissionLease
+    } = dispatched;
 
     log("Waiting for the deploy workflow to start...");
     let dRunId: number | string | null = null;
@@ -610,7 +618,21 @@ export function createDeployMonitorService(
         }
       }
 
-      if (confirmedWorkflowConclusion(detail)) {
+      const conclusion = confirmedWorkflowConclusion(detail);
+      if (conclusion) {
+        if (admissionLease && correlationId) {
+          assertCurrent();
+          try {
+            await admissionLease.settle({
+              kind: "terminal-candidate",
+              runId: dRunId,
+              conclusion
+            });
+          } catch {
+            log("⚠ Could not settle persistent deployment admission.");
+          }
+          assertCurrent();
+        }
         if (observation)
           observation = {
             ...observation,

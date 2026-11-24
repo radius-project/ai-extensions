@@ -26,6 +26,10 @@ import {
   type ProductionDeploymentPorts
 } from "./index.js";
 import type { DeploymentGraphRecovery } from "./deployment-monitor.js";
+import type {
+  DeployAdmissionPort,
+  DeployAdmissionRequest
+} from "./deployment-dispatch.js";
 
 type Runtime = ReturnType<typeof createProductionDeploymentRuntime>;
 const runtimes: Runtime[] = [];
@@ -511,6 +515,7 @@ describe("shared production deployment composition", () => {
 
   it("drains an issued dispatch without later callbacks after bounded shutdown", async () => {
     const h = fixture({ dispatch: "success" });
+    const settle = vi.fn(async () => {});
     const entered = createDeploymentDeferred<void>();
     const release = createDeploymentDeferred<void>();
     const execute: ProductionDeploymentPorts["execute"] = (
@@ -529,7 +534,11 @@ describe("shared production deployment composition", () => {
       });
       return {};
     };
-    const runtime = createProductionDeploymentRuntime({ ...h.ports, execute });
+    const runtime = createProductionDeploymentRuntime({
+      ...h.ports,
+      execute,
+      admission: { acquire: async () => ({ settle }) }
+    });
     runtimes.push(runtime);
     const dispatchListener = vi.fn();
     const stateListener = vi.fn();
@@ -557,6 +566,7 @@ describe("shared production deployment composition", () => {
       await vi.waitFor(() => expect(runtime.owner.hasActiveWork()).toBe(false));
       expect(stateListener).toHaveBeenCalledTimes(priorPublications);
       expect(dispatchListener).not.toHaveBeenCalled();
+      expect(settle).not.toHaveBeenCalled();
       expect(h.diagnostics).not.toHaveBeenCalled();
       expect(h.sendRepair).not.toHaveBeenCalled();
       expect(h.sendNotice).not.toHaveBeenCalled();
@@ -1081,6 +1091,71 @@ describe("shared production deployment composition", () => {
     });
     expect(calls.some((args) => args[0] === "workflow")).toBe(false);
     expect(runtime.owner.hasActiveWork()).toBe(false);
+  });
+
+  it("waits for shared atomic admission, excludes a competing runtime, and passes the terminal candidate to the lease owner", async () => {
+    const h = fixture({ dispatch: "success" });
+    const acquiring = createDeploymentDeferred<void>();
+    const grant = createDeploymentDeferred<void>();
+    const settle = vi.fn(async () => {});
+    let occupied = false;
+    const acquire = vi.fn(
+      async (_request: Readonly<DeployAdmissionRequest>) => {
+        if (occupied) return null;
+        occupied = true;
+        acquiring.resolve();
+        await grant.promise;
+        return { settle };
+      }
+    );
+    const admission: DeployAdmissionPort = { acquire };
+    const first = createProductionDeploymentRuntime({
+      ...h.ports,
+      admission
+    });
+    const second = createProductionDeploymentRuntime({
+      ...h.ports,
+      admission
+    });
+    runtimes.push(first, second);
+    const input = { repo: "owner/app", branch: "topic", environment: "dev" };
+    try {
+      const launch = await first.start(input);
+      if (!launch.ok) throw new Error(launch.error);
+      await acquiring.promise;
+      const competing = await second.start(input);
+      if (!competing.ok) throw new Error(competing.error);
+      await vi.waitFor(() => expect(second.owner.hasActiveWork()).toBe(false));
+      expect(competing.invocation.state.deployError).toContain(
+        "Another deployment or deletion holds admission"
+      );
+      expect(h.calls.filter((args) => args[0] === "workflow")).toEqual([]);
+      expect(settle).not.toHaveBeenCalled();
+
+      const firstRequest = acquire.mock.calls[0][0];
+      expect(firstRequest).toMatchObject({
+        ...input,
+        workflowFile: DEPLOY_DISPATCHER_FILE,
+        application: "modeled-app",
+        correlation: expect.stringMatching(/^dep-deployment-\d+$/),
+        startedAt: expect.any(Number)
+      });
+      grant.resolve();
+      await vi.waitFor(() => expect(first.owner.hasActiveWork()).toBe(false));
+      expect(launch.invocation.state.deployStatus).toBe("complete");
+      const dispatches = h.calls.filter((args) => args[0] === "workflow");
+      expect(dispatches).toHaveLength(1);
+      expect(dispatches[0]).toContain(
+        `correlation_id=${firstRequest.correlation}`
+      );
+      expect(settle).toHaveBeenCalledExactlyOnceWith({
+        kind: "terminal-candidate",
+        runId: 11,
+        conclusion: "success"
+      });
+    } finally {
+      grant.resolve();
+    }
   });
 
   it("dispatches and observes success through the same concrete bindings without Canvas", async () => {
