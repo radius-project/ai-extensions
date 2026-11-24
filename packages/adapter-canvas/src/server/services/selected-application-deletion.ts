@@ -25,6 +25,7 @@ import {
   type ApplicationDeletionDependencies
 } from "./application-deletion.js";
 import { createWorkflowObservationScope } from "./workflow-observation-scope.js";
+import { readApplicationDeletionHistory } from "./application-deletion-history.js";
 
 function normalizeDispatcherDefault(content: string): string {
   const fallback = /^        default: '([A-Za-z0-9_. -]+)'$/m.exec(
@@ -90,7 +91,19 @@ export function createSelectedApplicationDeletion(ports: {
       assertCurrent();
       return executor;
     };
-    const { credentialSource } = await verify();
+    const selected = await verify();
+    const { credentialSource } = selected;
+    const historyTarget = {
+      repo: approvedTarget.repo,
+      environment: approvedTarget.environment,
+      deploymentId: approvedTarget.deploymentId,
+      runId: approvedRun
+    };
+    const approvedHistory = await readApplicationDeletionHistory(
+      selected,
+      historyTarget,
+      assertCurrent
+    );
     let consumed = false;
     return {
       login,
@@ -240,6 +253,16 @@ export function createSelectedApplicationDeletion(ports: {
               )
                 throw new Error(
                   "The deployment changed before dispatch. Refresh the listing and confirm again."
+                );
+              if (
+                (await readApplicationDeletionHistory(
+                  executor,
+                  historyTarget,
+                  assertCurrent
+                )) !== approvedHistory
+              )
+                throw new Error(
+                  "GitHub deployment history changed after confirmation. Confirm the deletion again."
                 );
               if (
                 !verified ||

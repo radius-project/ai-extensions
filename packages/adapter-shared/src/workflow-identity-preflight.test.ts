@@ -41,6 +41,20 @@ describe("approved deployment guard", () => {
       ok: false
     },
     {
+      case: "first record has a lower ID than the approved record",
+      rows: [{ id: 1 }, { id: 2 }],
+      current: statuses(16),
+      approved: statuses(17),
+      ok: false
+    },
+    {
+      case: "unidentified first record",
+      rows: [{}, { id: 2 }],
+      current: [],
+      approved: statuses(17),
+      ok: false
+    },
+    {
       case: "newer record with the same run ID",
       rows: [{ id: 3 }, { id: 2 }],
       current: statuses(17),
@@ -87,6 +101,7 @@ describe("approved deployment guard", () => {
       };
       const fixtures = {
         "/repos/octo/app/deployments?environment=dev&per_page=10": rows,
+        "/repos/octo/app/deployments/1/statuses?per_page=1": current,
         "/repos/octo/app/deployments/3/statuses?per_page=1": current,
         "/repos/octo/app/deployments/2/statuses?per_page=1": approved
       };

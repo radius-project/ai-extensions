@@ -441,12 +441,30 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       scopes: ["workflow"],
       async run(args) {
         commands.push(args);
-        expect(args[0]).toBe("api");
-        if (args[1].includes("/deployments?")) {
+        const endpoint = `/repos/${repo}/deployments`;
+        const [command, path] = args;
+        expect(command).toBe("api");
+        if (
+          path ===
+          `/repos/${repo}/environments/${environment}/variables?per_page=100`
+        )
+          return { code: 0, stdout: "AZURE_CLIENT_ID", stderr: "" };
+        if (path === `${endpoint}?environment=${environment}&per_page=10`)
+          return { code: 0, stdout: '[{"id":42}]', stderr: "" };
+        if (path === `${endpoint}/42/statuses?per_page=1`)
+          return {
+            code: 0,
+            stdout: JSON.stringify([
+              { id: 100, state: "success", log_url: target.runUrl }
+            ]),
+            stderr: ""
+          };
+        if (path === `${endpoint}?per_page=100&environment=${environment}`) {
           waitingForSync.resolve();
           await releaseSync.promise;
+          return { code: 0, stdout: "", stderr: "" };
         }
-        return { code: 0, stdout: "", stderr: "" };
+        throw new Error(`Unexpected selected GitHub read: ${path}`);
       },
       runOrThrow: () => {
         throw new Error("Unexpected command");
