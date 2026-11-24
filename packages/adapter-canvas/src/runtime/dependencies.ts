@@ -314,6 +314,7 @@ export interface RadiusExtensionDependencies {
   session: SessionHolder;
   executionOwner: EnvironmentExecutionOwner;
   environment: EnvironmentTools;
+  deleteApplication(args: unknown): Promise<unknown>;
   clock: ClockDependencies;
   servers: Map<string, CanvasServerEntry>;
   getOrCreateServer(

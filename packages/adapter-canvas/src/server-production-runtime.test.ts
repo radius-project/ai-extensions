@@ -62,12 +62,14 @@ function runtime(
         typeof createProductionCanvasServerRuntime
       >[0]["serverDependencies"]
     >
-  > = {}
+  > = {},
+  executionOwner = createEnvironmentExecutionOwner(),
+  deploymentRuntime = createTestDeploymentRuntime()
 ) {
   return createProductionCanvasServerRuntime({
-    deploymentRuntime: createTestDeploymentRuntime(),
+    deploymentRuntime,
     awsEnabled: false,
-    executionOwner: createEnvironmentExecutionOwner(),
+    executionOwner,
     accountContext: accountContext(),
     environmentDeletionPorts: deletionPorts,
     serverDependencies: {
@@ -106,6 +108,54 @@ afterEach(async () => {
 });
 
 describe("production canvas server runtime", () => {
+  it.each(["environment", "deployment"] as const)(
+    "rejects chat deletion after %s services shut down",
+    async (owner) => {
+      const execution = createEnvironmentExecutionOwner();
+      const deployment = createTestDeploymentRuntime();
+      const server = runtime({}, execution, deployment);
+      if (owner === "environment") await execution.shutdown();
+      else await deployment.owner.shutdown(0);
+      await expect(
+        server.prepareApplicationDeletion({
+          login: "fixture-owner",
+          isCurrent: () => true,
+          request: {
+            repo: "octo/app",
+            environment: "dev",
+            application: "app",
+            deploymentId: "42",
+            runUrl: "https://github.com/octo/app/actions/runs/17",
+            force: false
+          }
+        })
+      ).rejects.toThrow("authorization expired");
+    }
+  );
+
+  it.each([true, false])(
+    "requires current authorization before opening the selected GitHub executor (%s)",
+    async (isCurrent) => {
+      const server = runtime();
+      await expect(
+        server.prepareApplicationDeletion({
+          login: "fixture-owner",
+          isCurrent: () => isCurrent,
+          request: {
+            repo: "octo/app",
+            environment: "dev",
+            application: "app",
+            deploymentId: "42",
+            runUrl: "https://github.com/octo/app/actions/runs/17",
+            force: false
+          }
+        })
+      ).rejects.toThrow(
+        isCurrent ? "Unexpected account read" : "authorization expired"
+      );
+    }
+  );
+
   it("reuses a loopback instance, updates its page, isolates instances, and cleans up idempotently", async () => {
     let now = 100;
     const createdStates: CanvasState[] = [];

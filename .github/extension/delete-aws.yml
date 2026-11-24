@@ -31,6 +31,12 @@ on:
         type: boolean
         required: false
         default: false
+      approved_deployment_id:
+        type: string
+        required: false
+      approved_run_id:
+        type: string
+        required: false
 
 permissions:
   id-token: write
@@ -40,6 +46,7 @@ permissions:
   # its last deployment, so the canvas Deployed graph does not keep rendering a
   # deployment that no longer exists.
   actions: write
+  deployments: read
 
 concurrency:
   group: radius-routes-gateway-${{ github.repository }}
@@ -78,6 +85,9 @@ jobs:
           application: ${{ inputs.name }}
           app-file: ''
           environment: ${{ inputs.environment }}
+          approved-deployment-id: ${{ inputs.approved_deployment_id }}
+          approved-run-id: ${{ inputs.approved_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Configure AWS Credentials (OIDC)
         if: ${{ vars.AWS_ROLE_ARN != '' }}

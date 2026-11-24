@@ -462,3 +462,20 @@ export {
 export { deploymentStatusBlocksMutation } from "./deploy-admission.js";
 export * from "./graph-source.js";
 export * from "./graph-orchestration.js";
+export {
+  deleteApplication,
+  type ApplicationDeletionDispatch,
+  type ApplicationDeletionPorts,
+  type ApplicationDeletionRequest,
+  type ApplicationDeletionResult,
+  type ApplicationDeletionSelection,
+  type ApplicationDeletionTarget
+} from "./application-deletion.js";
+export {
+  DELETE_FAILED_STATUS,
+  DELETE_RESULT_ARTIFACT,
+  DELETE_RESULT_FILE,
+  probeDeleteConflict,
+  type DeleteConflictProbe,
+  type DeleteConflictRequest
+} from "./delete-conflict.js";

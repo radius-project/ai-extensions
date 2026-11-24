@@ -1778,6 +1778,15 @@ describe("deployments routes (SU-06)", () => {
       expect(runGh).not.toHaveBeenCalled();
     });
 
+    it.each(["null", '"not-an-object"'])(
+      "rejects non-object delete payload %s",
+      async (body) => {
+        const { context, recording } = deleteContext(body);
+        await handleDeleteDeployment(context, deleteDependencies());
+        expect(recording.status).toBe(400);
+      }
+    );
+
     it.each([{ deploymentId: 12 }, { runUrl: false }])(
       "rejects malformed freshness input %j",
       async (expected) => {
@@ -1794,6 +1803,7 @@ describe("deployments routes (SU-06)", () => {
       overrides: Partial<DeploymentsDependencies>;
       status: number;
       force?: boolean;
+      retainsLease?: boolean;
     }>([
       {
         name: "unavailable remote state",
@@ -1829,6 +1839,7 @@ describe("deployments routes (SU-06)", () => {
       {
         name: "ambiguous dispatch timeout",
         status: 400,
+        retainsLease: true,
         overrides: {
           runGh: async () => ({
             code: 1,
@@ -1840,7 +1851,7 @@ describe("deployments routes (SU-06)", () => {
       }
     ])(
       "preserves captured evidence after $name",
-      async ({ overrides, status, force }) => {
+      async ({ overrides, status, force, retainsLease }) => {
         const invalidate = vi.fn();
         const capture = vi.fn(() => invalidate);
         const release = vi.fn();
@@ -1863,11 +1874,11 @@ describe("deployments routes (SU-06)", () => {
         expect(recording.status).toBe(status);
         expect(capture).toHaveBeenCalledOnce();
         expect(invalidate).not.toHaveBeenCalled();
-        expect(release).toHaveBeenCalledOnce();
+        expect(release).toHaveBeenCalledTimes(retainsLease ? 0 : 1);
       }
     );
 
-    it.each(["missing", "throwing"] as const)(
+    it.each(["missing", "throwing", "string rejection"] as const)(
       "retains accepted dispatch and its lease after %s run discovery",
       async (discovery) => {
         const invalidate = vi.fn();
@@ -1901,6 +1912,8 @@ describe("deployments routes (SU-06)", () => {
                   "Authorization: Bearer fixture-only-value\n" +
                     "x".repeat(3000)
                 );
+              if (discovery === "string rejection")
+                return Promise.reject("run API unavailable");
               return null;
             }
           })
@@ -1921,7 +1934,11 @@ describe("deployments routes (SU-06)", () => {
         );
         expect(dispatch).toHaveBeenCalledOnce();
         expect(release).not.toHaveBeenCalled();
-        if (discovery === "throwing") {
+        if (discovery === "string rejection") {
+          expect(logError).toHaveBeenCalledWith(
+            expect.stringContaining("run API unavailable")
+          );
+        } else if (discovery === "throwing") {
           expect(logError).toHaveBeenCalledOnce();
           const diagnostic = logError.mock.calls[0][0];
           expect(diagnostic).not.toContain("fixture-only-value");

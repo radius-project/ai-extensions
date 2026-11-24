@@ -20,6 +20,8 @@ import { createDeploymentViews } from "../../../src/server/services/deployment-v
 import { createTestDeploymentRuntime } from "../../support/server/deployment-runtime.js";
 import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
+import { createEnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
+import type { SelectedGhExecutor } from "../../../src/gh.js";
 import type {
   DeploymentRuntime,
   DeploymentRuntimePorts
@@ -418,6 +420,119 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 }
 
 describe("deployments routes real-loopback HIT (RF-05)", () => {
+  it("shares a production reservation across panel-free delete, Canvas delete, and deploy", async () => {
+    const repo = "octo/todolist";
+    const environment = "dev";
+    const target = {
+      repo,
+      environment,
+      application: "todolist",
+      force: false,
+      deploymentId: "42",
+      runUrl: `https://github.com/${repo}/actions/runs/17`
+    };
+    const waitingForSync = createDeferred<void>();
+    const releaseSync = createDeferred<void>();
+    const commands: string[][] = [];
+    const selected: SelectedGhExecutor = {
+      login: "fixture-owner",
+      credentialSource: "keyring",
+      requiresKeyringSwitch: false,
+      scopes: ["workflow"],
+      async run(args) {
+        commands.push(args);
+        expect(args[0]).toBe("api");
+        if (args[1].includes("/deployments?")) {
+          waitingForSync.resolve();
+          await releaseSync.promise;
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+      runOrThrow: () => {
+        throw new Error("Unexpected command");
+      },
+      verifyIdentity: async () => {},
+      packageCredentials: () => {
+        throw new Error("Unexpected package credential read");
+      },
+      redact: (value) => value,
+      errorMessage: String
+    };
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: createEnvironmentAccountContext("application-delete", {
+        createReadOnlyExecutor: async (login) => {
+          expect(login).toBe(selected.login);
+          return selected;
+        },
+        withSelectedAccount: () => {
+          throw new Error("Unexpected account switch");
+        }
+      }),
+      cliExec: () => {
+        throw new Error("Ambient GitHub is forbidden");
+      }
+    });
+    const instance = "shared-delete-reservation";
+    const prepared = await runtime.prepareApplicationDeletion({
+      login: selected.login,
+      request: target,
+      isCurrent: () => true
+    });
+    const active = prepared.execute();
+    try {
+      await Promise.race([
+        waitingForSync.promise,
+        active.then((result) => {
+          throw new Error(
+            `Unexpected early delete result: ${JSON.stringify(result)}`
+          );
+        })
+      ]);
+      expect(runtime.servers.size).toBe(0);
+      expect(
+        runtime.deploymentRuntime.owner.reserve(
+          { repo: "OCTO/TODOLIST", environment: "DEV" },
+          "deploy"
+        )
+      ).toBeNull();
+      const entry = await runtime.getOrCreateServer(instance, "deployments");
+      const nonce = entry.state.browserMutationNonce;
+      if (typeof nonce !== "string" || !nonce)
+        throw new Error("Missing browser mutation nonce");
+      const response = await fetch(`${entry.baseUrl}/api/delete-deployment`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: new URL(entry.baseUrl).origin,
+          "sec-fetch-site": "same-origin",
+          "x-radius-mutation-nonce": nonce
+        },
+        body: JSON.stringify(target)
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: "Another deployment operation is already starting."
+      });
+      expect(commands.some(([command]) => command === "workflow")).toBe(false);
+      releaseSync.resolve();
+      await expect(active).resolves.toEqual({
+        status: 409,
+        body: {
+          error:
+            "The deployment changed. Refresh the listing before trying again."
+        }
+      });
+      expect(
+        commands.filter(([command]) => command === "workflow")
+      ).toHaveLength(0);
+    } finally {
+      releaseSync.resolve();
+      await active;
+      await runtime.stopServer(instance, true);
+      await runtime.deploymentRuntime.owner.shutdown(1000);
+    }
+  });
   it("keeps healthy environments visible over HTTP when peers are incomplete or unreadable", async () => {
     const cleanupSelection = {
       deploymentId: "7",
@@ -1978,20 +2093,30 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     );
     const entry = await container!.getOrCreate("panel-a");
 
+    const payload = JSON.stringify({
+      repo: "octo/todo",
+      environment: "dev",
+      application: "todo-app"
+    });
     const response = await post(
       entry.baseUrl,
       "/api/delete-deployment",
-      JSON.stringify({
-        repo: "octo/todo",
-        environment: "dev",
-        application: "todo-app"
-      })
+      payload
     );
 
     expect(response.status).toBe(400);
     expect(harness.dispatches).toHaveLength(1);
-    const body = (await response.json()) as { error: string };
-    expect(body.error).toContain('missing the "workflow" scope');
+    expect(await response.json()).toEqual({
+      error:
+        "GitHub may have accepted the delete workflow. Check Actions before trying again."
+    });
+    const duplicate = await post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      payload
+    );
+    expect(duplicate.status).toBe(409);
+    expect(harness.dispatches).toHaveLength(1);
   });
 
   // The force path is destructive in a way the ordinary delete is not: it drops

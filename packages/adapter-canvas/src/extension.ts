@@ -116,6 +116,8 @@ import { githubAccountChoice } from "./runtime/github-account-choice.js";
 import { createDeploymentAccountResolver } from "./runtime/deployment-account.js";
 import { createGitHubAccountReadinessService } from "./server/services/github-account-readiness.js";
 import { createEnvironmentTools } from "./runtime/environment-tools.js";
+import { confirmDeletion } from "./runtime/deletion-confirmation.js";
+import { createWorkspaceApplicationDeletion } from "./runtime/deletion-workspace.js";
 import { setupDevSelfReload } from "./runtime/dev-reload.js";
 import {
   configureProcessLifecycle,
@@ -168,13 +170,15 @@ const {
   getOrCreateServer,
   stopServer,
   getLastWebviewActivityAt,
-  environmentServices
+  environmentServices,
+  prepareApplicationDeletion
 } = createProductionCanvasServerRuntime({
   executionOwner,
   accountContext,
   deploymentRuntime,
   awsEnabled
 });
+const deletionIsActive = () => !executionOwner.isShuttingDown();
 const dependencies: RadiusExtensionDependencies = {
   logError: (message) => console.error(message),
   automaticPluginUpdates: automaticPluginUpdatesEnabled(process.env),
@@ -190,6 +194,22 @@ const dependencies: RadiusExtensionDependencies = {
   deployment: deploymentRuntime,
   readDeploymentModel,
   executionOwner,
+  deleteApplication: createWorkspaceApplicationDeletion({
+    session: sessionHolder,
+    isActive: deletionIsActive,
+    workspace: detectWorkspaceContext,
+    async listLogins() {
+      resetGhIdentityCache();
+      return (await getGitHubIdentity()).accounts.map(({ login }) => login);
+    },
+    createExecutor: (login) =>
+      accountContext.coordinator.createReadOnlyExecutor(login),
+    chooseAccount: () => githubAccountChoice(sessionHolder.tryGet()),
+    confirm: (message) =>
+      confirmDeletion(sessionHolder, message, deletionIsActive),
+    prepare: prepareApplicationDeletion,
+    redact: redactGhCredentials
+  }),
   environment: createEnvironmentTools({
     ...environmentServices,
     owner: executionOwner,
