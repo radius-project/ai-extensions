@@ -7,12 +7,10 @@ export const OCI_STATE_BACKEND = "oci";
 export const DEFAULT_STATE_ARCHIVE = "radius-state";
 
 function slug(value: string, maxLength: number): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, maxLength)
-    .replace(/-+$/g, "");
+  const collapsed = value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const prefix = collapsed.startsWith("-") ? 1 : 0;
+  const truncated = collapsed.slice(prefix, prefix + maxLength);
+  return truncated.endsWith("-") ? truncated.slice(0, -1) : truncated;
 }
 
 function hash32(value: string, seed: number): string {

@@ -32,6 +32,24 @@ describe("stateRegistryForEnvironment", () => {
     expect(slashName).not.toBe(hyphenName);
   });
 
+  it("drops edge separators and collapses interior separators in each slug", () => {
+    expect(
+      stateRegistryForEnvironment(
+        "._Acme--Team_./--My._App!!",
+        "!!Staging / EU--"
+      )
+    ).toMatch(
+      /^ghcr\.io\/acme-team\/my-app-radius-state-staging-eu-[a-f0-9]{12}$/
+    );
+  });
+
+  it("counts the limit from the first alphanumeric character", () => {
+    const owner = `${"o".repeat(38)}x`;
+    const registry = stateRegistryForEnvironment(`--${owner}-extra/app`, "dev");
+
+    expect(registry.split("/")[1]).toBe(owner);
+  });
+
   it("caps long package names within the OCI repository limit", () => {
     const registry = stateRegistryForEnvironment(
       `owner/${"r".repeat(100)}`,
