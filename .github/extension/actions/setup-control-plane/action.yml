@@ -47,7 +47,7 @@ runs:
           --volume "${GITHUB_WORKSPACE_SAFE}/:/app/demo" \
           --k3s-arg "--disable=traefik@server:*" \
           --wait
-        kubectl wait --for=condition=Ready node --all --timeout=120s
+        timeout 120s bash "${GITHUB_ACTION_PATH}/wait-for-control-plane.sh"
 
     # install.sh only needs the oras CLI for edge builds. Kept so switching back
     # to edge stays a one-line change.
