@@ -88,7 +88,7 @@ runs:
       # so the secret must exist before `rad install`.
       shell: bash
       run: |
-        timeout 5m bash "${GITHUB_ACTION_PATH}/create-target-kubeconfig.sh"
+        timeout --kill-after=10s 290s bash "${GITHUB_ACTION_PATH}/create-target-kubeconfig.sh"
 
     - name: Install Radius on control plane
       shell: bash

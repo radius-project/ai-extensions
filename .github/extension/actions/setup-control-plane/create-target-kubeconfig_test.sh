@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 
 python3 - "${SCRIPT_DIR}" <<'PYTHON'
+import base64
 import json
 import os
 import pathlib
@@ -13,6 +14,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 source = pathlib.Path(sys.argv[1])
 action = (source / "action.yml").read_text(encoding="utf-8")
@@ -24,10 +26,43 @@ step = re.search(
 )
 assert step, "Missing create-secret action step"
 script = "\n".join(line[8:] for line in step[1].splitlines()) + "\n"
-assert script.startswith('timeout 5m bash '), "Missing hard preparation bound"
+bound = "timeout --kill-after=10s 290s bash "
+assert script.startswith(bound), "Missing hard preparation bound"
 subprocess.run(
     ["shellcheck", "--shell=bash", "-"], input=script, text=True, check=True
 )
+
+# Run the real step with shortened limits against a helper that ignores
+# SIGTERM, and check that SIGKILL ends it and SIGTERM ends its descendants.
+with tempfile.TemporaryDirectory(prefix="target-kubeconfig-kill-") as directory:
+    action_path = pathlib.Path(directory)
+    (action_path / "create-target-kubeconfig.sh").write_text(
+        "sleep 60 &\n"
+        'echo "$!" >"${GITHUB_ACTION_PATH}/descendant"\n'
+        "trap '' TERM\n"
+        "while :; do sleep 0.1; done\n",
+        encoding="utf-8",
+    )
+    started = time.monotonic()
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c",
+         script.replace(bound, "timeout --kill-after=1s 1s bash ", 1)],
+        env={**os.environ, "GITHUB_ACTION_PATH": str(action_path)},
+        text=True, capture_output=True, timeout=15,
+    )
+    elapsed = time.monotonic() - started
+    assert result.returncode == 137, result
+    assert elapsed < 5, elapsed
+    descendant = int((action_path / "descendant").read_text())
+    for _ in range(50):
+        try:
+            os.kill(descendant, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(descendant, 9)
+        raise AssertionError(f"descendant {descendant} survived the timeout")
 
 unavailable = (
     'error: error validating "STDIN": error validating data: '
@@ -65,10 +100,20 @@ with tempfile.TemporaryDirectory(prefix="target-kubeconfig-test-") as directory:
     binary.mkdir()
     (binary / "kubectl").write_text(
         """#!/usr/bin/env python3
-import json, os, pathlib, sys
+import base64, json, os, pathlib, sys
 root = pathlib.Path(os.environ["CASE_ROOT"])
 args = sys.argv[1:]
 assert args.pop(0) == "--request-timeout=10s", args
+kubeconfig = pathlib.Path(os.environ["RADIUS_TARGET_KUBECONFIG"]).read_bytes()
+manifests = {
+    "namespace": "apiVersion: v1\\nkind: Namespace\\nmetadata:\\n  name: radius-system",
+    "secret": (
+        "apiVersion: v1\\ndata:\\n  kubeconfig: "
+        + base64.b64encode(kubeconfig).decode()
+        + "\\nkind: Secret\\nmetadata:\\n  name: target-kubeconfig\\n"
+        "  namespace: radius-system"
+    ),
+}
 if args[0] == "create":
     assert args[-3:] == ["--dry-run=client", "-o", "yaml"], args
     if args[1] == "namespace":
@@ -86,11 +131,12 @@ if args[0] == "create":
     if os.environ.get("FAIL_GENERATE") == resource:
         print("synthetic generation failure", file=sys.stderr)
         sys.exit(7)
-    print(resource)
+    print(manifests[resource])
 elif args == ["apply", "-f", "-"]:
-    resource = sys.stdin.read().strip()
-    if resource not in ("namespace", "secret"):
-        print("missing manifest", file=sys.stderr)
+    received = sys.stdin.read().rstrip("\\n")
+    resource = next((r for r, m in manifests.items() if m == received), None)
+    if resource is None:
+        print("unexpected manifest", file=sys.stderr)
         sys.exit(8)
     counter = root / (resource + ".count")
     index = int(counter.read_text()) if counter.exists() else 0
@@ -112,7 +158,15 @@ else:
     for stub in binary.iterdir():
         stub.chmod(0o755)
     kubeconfig = root / "target config"
-    kubeconfig.write_text("synthetic target", encoding="utf-8")
+    kubeconfig_text = (
+        "apiVersion: v1\nkind: Config\nusers:\n"
+        "- name: target\n  user:\n    token: synthetic-target-token-6d1f\n"
+    )
+    kubeconfig.write_text(kubeconfig_text, encoding="utf-8")
+    secret_values = [
+        "synthetic-target-token-6d1f",
+        base64.b64encode(kubeconfig_text.encode()).decode(),
+    ]
     for index, (name, namespaces, secrets, code, ns_count, secret_count, sleeps) in enumerate(cases):
         case = root / str(index)
         case.mkdir()
@@ -129,7 +183,8 @@ else:
             env=env, text=True, capture_output=True, timeout=10,
         )
         assert result.returncode == code, (name, result)
-        assert "synthetic target" not in result.stdout + result.stderr, result
+        for value in secret_values:
+            assert value not in result.stdout + result.stderr, (name, result)
         for resource, expected in [("namespace", ns_count), ("secret", secret_count)]:
             path = case / (resource + ".count")
             actual = int(path.read_text()) if path.exists() else 0
