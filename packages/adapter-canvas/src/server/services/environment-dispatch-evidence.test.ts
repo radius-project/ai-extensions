@@ -137,6 +137,11 @@ describe("selected environment dispatch evidence", () => {
   it.each([
     { total_count: 2, workflow_runs: [runInfo] },
     { total_count: 2, workflow_runs: [runInfo, { ...runInfo, id: 22 }] },
+    { total_count: 2, workflow_runs: [runInfo, null] },
+    { total_count: 1, workflow_runs: [{ ...runInfo, display_title: null }] },
+    { total_count: 1, workflow_runs: [{ ...runInfo, actor: null }] },
+    { total_count: 1, workflow_runs: [{ ...runInfo, actor: { login: null } }] },
+    { total_count: 1, workflow_runs: [{ ...runInfo, head_branch: "other" }] },
     {
       total_count: 1,
       workflow_runs: [{ ...runInfo, actor: { login: "another-user" } }]
@@ -210,6 +215,8 @@ describe("selected environment dispatch evidence", () => {
       }
     },
     { jobs: { total_count: 2, jobs: [azureJob] } },
+    { jobs: { total_count: 1, jobs: [{ ...azureJob, name: "Other job" }] } },
+    { jobs: { total_count: 2, jobs: [azureJob, azureJob] } },
     { jobs: { total_count: 1, jobs: [{ ...azureJob, run_attempt: 1 }] } },
     { jobs: { total_count: 1, jobs: [{ ...azureJob, steps: null }] } },
     {

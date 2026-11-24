@@ -763,6 +763,16 @@ describe("production canvas server runtime", () => {
             message: expect.stringContaining("applications guard")
           }
         });
+        const savedGuard = operation.request.selectedDispatchAttempts;
+        const savesAfterGuard = save.mock.calls.length;
+        expect(
+          await runtime.controlSelectedEnvironmentDeletion({
+            ...target,
+            command: "status"
+          })
+        ).toEqual(guarded);
+        expect(save.mock.calls).toHaveLength(savesAfterGuard);
+        expect(operation.request.selectedDispatchAttempts).toBe(savedGuard);
         rerunStarted = true;
         const guardedEvidence =
           "retryEvidence" in guarded.body ?

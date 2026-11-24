@@ -275,6 +275,49 @@ describe("saved-account environment deletion", () => {
     }
   );
 
+  it("saves a verified guard only for the run already correlated to the operation", async () => {
+    const f = fixture();
+    const correlated: EnvironmentDispatchAttempt = {
+      ...f.dispatch,
+      branch: "main",
+      head: "a".repeat(40),
+      operationAttempt: 0,
+      runId: 7,
+      state: "correlated"
+    };
+    const guarded: EnvironmentDispatchAttempt = {
+      ...correlated,
+      state: "guarded",
+      runAttempt: 1,
+      updatedAt: "2026-01-02T03:04:05Z"
+    };
+    f.operation.request.selectedDispatchAttempts = [correlated];
+    await runSelectedEnvironmentDeletion(f.operation, {
+      ...f.dependencies,
+      bind(executor, current, legacyDispatch, legacyRecovery, journal) {
+        return {
+          ...f.bind(executor, current, legacyDispatch, legacyRecovery),
+          async deleteRadiusEnvironment() {
+            await expect(
+              journal.record({ ...guarded, runId: 8 })
+            ).rejects.toThrow("saved delete workflow dispatch attempt changed");
+            expect(f.operation.request.selectedDispatchAttempts).toEqual([
+              correlated
+            ]);
+            await journal.record(guarded);
+            return { outcome: "failed" };
+          }
+        };
+      }
+    });
+    expect(f.operation.request.selectedDispatchAttempts).toEqual([guarded]);
+    expect(canRetryDeletion(f.operation)).toMatchObject({
+      ok: true,
+      resumeFrom: STAGE_DELETE_RADIUS_ENV
+    });
+    expect(f.deleteGitHubEnvironment).not.toHaveBeenCalled();
+  });
+
   it("reacquires the exact saved account and resumes only package cleanup after restart", async () => {
     const f = fixture();
     for (const stage of f.operation.stages) {
@@ -347,6 +390,29 @@ describe("saved-account environment deletion", () => {
     expect(f.deleteRadius).not.toHaveBeenCalled();
     expect(restored.state).toBe("succeeded");
   });
+
+  it.each([undefined, false, "invalid"] as const)(
+    "keeps legacy dispatch metadata without an explicit marker from authorizing redispatch (%s)",
+    async (marker) => {
+      const f = fixture();
+      Object.assign(f.operation.request, {
+        ...(marker === undefined ? {} : { selectedDispatchStarted: marker }),
+        selectedDispatchTime: f.dispatch.dispatchedAt,
+        selectedDispatchCorrelation: f.dispatch.correlationId
+      });
+      const restored = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(f.operation))
+      );
+      await runSelectedEnvironmentDeletion(restored, f.dependencies);
+      expect(restored.state).toBe("failed_partial");
+      expect(canRetryDeletion(restored)).toMatchObject({
+        ok: false,
+        code: "deletion-dispatch-unconfirmed"
+      });
+      expect(f.observe).not.toHaveBeenCalled();
+      expect(f.deleteRadius).not.toHaveBeenCalled();
+    }
+  );
 
   it.each([true, false])(
     "continues after an interrupted environment delete only if absence is confirmed (%s)",
