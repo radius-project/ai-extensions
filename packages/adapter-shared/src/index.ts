@@ -118,3 +118,4 @@ export {
   inspectEnvironments,
   type EnvironmentInspectionRead
 } from "./environment-inspection.js";
+export { dispatchApplicationDelete } from "./application-delete-dispatch.js";

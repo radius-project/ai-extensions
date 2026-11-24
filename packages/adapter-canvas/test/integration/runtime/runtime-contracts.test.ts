@@ -46,6 +46,8 @@ import {
   type WorkflowRunner
 } from "@radius-project/adapter-shared";
 import { createDeployModelSource } from "../../../src/server/services/deploy-model-source.js";
+import { createApplicationDeletionTool } from "../../../src/runtime/application-deletion-tool.js";
+import { confirmDeletion } from "../../../src/runtime/deletion-confirmation.js";
 
 const ACTION_NAMES = ["get_graph_resources", "update_source_refs"];
 
@@ -60,7 +62,8 @@ const TOOL_NAMES = [
   "radius_deploy_status",
   "radius_setup_environment",
   "radius_environment_status",
-  "radius_environment_control"
+  "radius_environment_control",
+  "radius_delete_application"
 ];
 
 // The skillBase the fake radiusAppBicepSkill reports. A handoff that carries
@@ -105,6 +108,61 @@ function registerDeploymentStatus(
 }
 
 describe("P0-A Radius runtime registration contract", () => {
+  it("keeps registered application force retry panel-free and separate from approval arguments", async () => {
+    const request = {
+      repo: "org/app",
+      environment: "test",
+      application: "api",
+      deploymentId: "123",
+      runUrl: "https://github.com/org/app/actions/runs/456",
+      mode: "force_retry"
+    };
+    const execute = vi.fn(async () => ({
+      status: 200 as const,
+      body: { success: true as const, runUrl: request.runUrl, forced: true }
+    }));
+    const confirm = vi
+      .fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const harness = await createRuntimeSdkHarness({}, (deps, session) => {
+      session.capabilities = { ui: { elicitation: true } };
+      session.ui = { confirm, select: async () => null };
+      deps.deleteApplication = createApplicationDeletionTool({
+        prepare: async () => ({ login: "operator", execute }),
+        confirm: (message) =>
+          confirmDeletion(
+            deps.session,
+            message,
+            () => !deps.executionOwner.isShuttingDown()
+          ),
+        redact: redactCredentials
+      }).handler;
+    });
+    try {
+      const tool = harness.extension.tools.find(
+        ({ name }) => name === "radius_delete_application"
+      );
+      if (!tool) throw new Error("Missing application deletion tool.");
+      expect(await tool.handler({ ...request, approved: true })).toContain(
+        "interaction_required"
+      );
+      expect(confirm).not.toHaveBeenCalled();
+      expect(await tool.handler(request)).toContain(
+        "application-deletion-declined"
+      );
+      expect(execute).not.toHaveBeenCalled();
+      expect(await tool.handler(request)).toContain('"forced":true');
+      expect(confirm).toHaveBeenLastCalledWith(
+        expect.stringMatching(/@operator.*force deletion/i)
+      );
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(harness.deps.servers.size).toBe(0);
+    } finally {
+      await harness.extension.shutdown();
+    }
+  });
+
   it.each([0, 1, 2])(
     "resolves an explicit target without a branch independently of %i unrelated prior deployments",
     async (priorCount) => {

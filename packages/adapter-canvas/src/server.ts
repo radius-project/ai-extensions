@@ -7,6 +7,8 @@ import {
   createDeploymentObservationBindings,
   createGraphSourceBindings,
   readWorkspaceFile,
+  type DeploymentCommandExecutor,
+  type DeploymentObservationExecutor,
   type DeploymentRuntime
 } from "@radius-project/adapter-shared";
 import { createDeploymentViews } from "./server/services/deployment-views.js";
@@ -277,8 +279,6 @@ import {
   buildDeployMessageMap,
   buildDeployStatusMap,
   createDeployStatusReader,
-  downloadWorkflowArtifact,
-  listWorkflowArtifacts,
   settleDeployStatuses
 } from "./deploy-artifacts.js";
 import { graphPage } from "./pages/graph-page.js";
@@ -299,6 +299,7 @@ import { createServerRouteTable } from "./server/route-table.js";
 import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
 import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { probeDeleteConflict } from "./server/services/delete-conflict.js";
+import { createSelectedApplicationDeletion } from "./server/services/selected-application-deletion.js";
 import {
   createOperationsStatusRoutes,
   type OperationActionDependencies
@@ -3500,12 +3501,16 @@ async function resolveEnvDeployment(
   );
 }
 
-function deploymentLookupFor(execute: typeof cliExec) {
+type DeploymentLookupExecute = DeploymentCommandExecutor &
+  DeploymentObservationExecutor;
+
+function deploymentLookupFor(execute: DeploymentLookupExecute) {
+  const repository = createDeploymentRepository({
+    execute,
+    redactDiagnostic: redactGhCredentials
+  });
   return createDeploymentLookup({
-    repository: createDeploymentRepository({
-      execute,
-      redactDiagnostic: redactGhCredentials
-    }),
+    repository,
     readApplicationIdentity: createDeploymentIdentityReader({
       ...createDeploymentObservationBindings({
         execute,
@@ -3513,7 +3518,7 @@ function deploymentLookupFor(execute: typeof cliExec) {
       }),
       redactDiagnostic: redactGhCredentials
     }),
-    ghOrThrow: (args) => ghOrThrow(args, 12000, execute),
+    ghOrThrow: (args) => repository.ghOrThrow(args, 12000),
     deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
     deleteWorkflowFile: DELETE_WORKFLOW_FILE,
     maxParallelRecords: DEPLOY_MAX_PARALLEL_RECORDS
@@ -5781,7 +5786,11 @@ export function createProductionCanvasServerRuntime(
   // temporal dead zone when this runtime's route dependencies are built.
   const { inspectRepoApplication, resolveRepoAppName } =
     deploymentLookupFor(cliExecPort);
-  const deploymentsRoutes = createDeploymentsRoutes({
+  const deleteReads = createDeploymentObservationBindings({
+    execute: cliExecPort,
+    redactDiagnostic: redactGhCredentials
+  });
+  const deploymentsDependencies = {
     ghCommandPresentation: GH_COMMAND_PRESENTATION,
     isValidRepoSlug,
     readInstanceEntry: (instanceId) => {
@@ -5822,7 +5831,7 @@ export function createProductionCanvasServerRuntime(
     ensureWorkflowsCurrent: ensureWorkflowsCurrent.bind(undefined, awsEnabled),
     deleteApplicationWorkflowFiles: deleteApplicationWorkflowFiles(awsEnabled),
     findWorkflowRun: (repo, file, since, known, correlation) =>
-      findWorkflowRun(
+      deleteReads.findWorkflowRun(
         repo,
         file,
         since,
@@ -5860,8 +5869,11 @@ export function createProductionCanvasServerRuntime(
     get abandonment() {
       return deploymentAbandonmentService;
     },
-    probeDeleteConflict: (request, instanceId) => {
-      const scope = canvasServer.instances.get(instanceId)?.observation;
+    probeDeleteConflict: (request, instanceId, selection) => {
+      const scope =
+        instanceId === undefined ? undefined : (
+          canvasServer.instances.get(instanceId)?.observation
+        );
       if (!scope)
         throw new Error("Workflow observation instance is unavailable.");
       let observation: WorkflowReadRequest | undefined;
@@ -5870,14 +5882,32 @@ export function createProductionCanvasServerRuntime(
           undefined,
           WORKFLOW_READ_LIMITS.deleteConflictMs
         ));
-      return probeDeleteConflict(request, {
-        resolveEnvDeployment,
-        listArtifacts: (repo, runId) =>
-          listWorkflowArtifacts(repo, runId, undefined, read().context),
-        downloadArtifact: (repo, artifact) =>
-          downloadWorkflowArtifact(repo, artifact, read().context)
-      });
+      return probeDeleteConflict(
+        request,
+        {
+          resolveEnvDeployment: (repo, environment, application) =>
+            resolveEnvDeployment(repo, environment, application, cliExecPort),
+          listArtifacts: (repo, runId) =>
+            deleteReads.listWorkflowArtifacts(
+              repo,
+              runId,
+              undefined,
+              read().context
+            ),
+          downloadArtifact: (repo, artifact) =>
+            deleteReads.downloadWorkflowArtifact(repo, artifact, read().context)
+        },
+        selection
+      );
     }
+  } satisfies Parameters<typeof createDeploymentsRoutes>[0];
+  const deploymentsRoutes = createDeploymentsRoutes(deploymentsDependencies);
+  const prepareSelectedDelete = createSelectedApplicationDeletion({
+    createExecutor: (login) =>
+      githubAccountCoordinator.createReadOnlyExecutor(login),
+    createLookup: deploymentLookupFor,
+    deletion: deploymentsDependencies,
+    awsEnabled
   });
 
   const azureSetupDependencies = composeAzureAutoSetupDependencies({
@@ -6721,6 +6751,16 @@ export function createProductionCanvasServerRuntime(
   return {
     servers: canvasServer.instances,
     deploymentRuntime,
+    prepareApplicationDeletion: (
+      input: Parameters<typeof prepareSelectedDelete>[0]
+    ) =>
+      prepareSelectedDelete({
+        ...input,
+        isCurrent: () =>
+          input.isCurrent() &&
+          !executionOwner.isShuttingDown() &&
+          !deploymentRuntime.owner.isShuttingDown()
+      }),
     detachDeploymentView: deploymentViews.detach,
     setupExecution,
     verificationStatus,

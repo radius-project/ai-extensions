@@ -12,8 +12,8 @@ import type {
 import type {
   ArtifactFiles,
   WorkflowArtifact
-} from "../../deploy-artifacts.js";
-import type { DeploymentRow } from "./deployment-resolver.js";
+} from "./deploy-artifact-evidence.js";
+import type { DeploymentRow } from "./deployment-lookup-policy.js";
 
 const REQUEST = {
   repo: "octo/app",
@@ -123,6 +123,31 @@ describe("readNonTerminalState", () => {
 });
 
 describe("probeDeleteConflict", () => {
+  it("does not read artifacts when the deployment has disappeared", async () => {
+    const h = probe({ resolveEnvDeployment: async () => null });
+    expect(await h.run()).toEqual({ state: "clear" });
+    expect(h.calls.listed).toEqual([]);
+  });
+
+  it("does not read an artifact from a different delete than the admitted one", async () => {
+    const listArtifacts = () => {
+      throw new Error("Must not list another run's artifacts");
+    };
+    const result = await probeDeleteConflict(
+      REQUEST,
+      {
+        resolveEnvDeployment: async () =>
+          failedDeployment({ deploymentId: "18" }),
+        listArtifacts,
+        downloadArtifact: listArtifacts
+      },
+      { deploymentId: "17", runUrl: RUN_URL }
+    );
+    expect(result).toEqual({
+      state: "unknown",
+      detail: "The deployment changed. Refresh the listing before trying again."
+    });
+  });
   it.each([{ resourceType: "container" }, { name: "other-app" }, { name: "" }])(
     "never proves force-delete from mismatched result identity %j",
     async (change) => {

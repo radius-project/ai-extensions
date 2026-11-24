@@ -391,14 +391,34 @@ ${indent}    echo "✅ GHCR accepted a non-mutating upload-session probe."`;
  */
 export async function generateDeleteWorkflow(
   env: string,
-  options: ProviderWorkflowOptions = {}
+  options: ProviderWorkflowOptions & {
+    readTemplate?(
+      repo: string,
+      path: string,
+      ref: string
+    ): Promise<string | null>;
+  } = {}
 ): Promise<Record<string, string>> {
   const includeAws = options.includeAws ?? false;
   const applicationFiles = deleteApplicationWorkflowFiles(includeAws);
   const environmentFiles = deleteEnvironmentWorkflowFiles(includeAws);
   const fetched = [...applicationFiles, ...environmentFiles];
   const fetchedBodies = await Promise.all(
-    fetched.map((f) => fetchRadiusTemplate(f, DELETE_RADIUS_REF))
+    fetched.map(async (f) => {
+      if (!options.readTemplate)
+        return fetchRadiusTemplate(f, DELETE_RADIUS_REF);
+      const source = `${RADIUS_WORKFLOW_DIR}/${f}`;
+      const text = await options.readTemplate(
+        RADIUS_WORKFLOW_REPO,
+        source,
+        DELETE_RADIUS_REF
+      );
+      if (!text?.trim())
+        throw new Error(
+          `Could not read canonical deletion template ${source}.`
+        );
+      return text;
+    })
   );
   const templates: Record<string, string> = {};
   fetched.forEach((f, i) => {

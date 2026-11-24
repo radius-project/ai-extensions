@@ -13,20 +13,14 @@ import {
 import type {
   DeleteConflictProbe,
   DeleteConflictRequest
-} from "../services/delete-conflict.js";
-import { shouldRetryWithKeyringCredential } from "../services/workflow-credential-fallback.js";
+} from "@radius-project/core";
+import { requestApplicationDeletion } from "../services/application-deletion.js";
 import type { DeletedDeploymentIdentity } from "../services/deployed-view-state.js";
 import { redactGhCredentials } from "../../gh.js";
-import { DELETE_FAILED_STATUS } from "../services/delete-conflict.js";
-import { DELETE_APP_DISPATCHER_FILE } from "../../infra.js";
-import {
-  BARE_GH_COMMAND_PRESENTATION,
-  displayGhCommand,
-  type GhCommandPresentation
-} from "../../gh-command-display.js";
+import { type GhCommandPresentation } from "../../gh-command-display.js";
 import {
   projectSafeApplicationGraph,
-  deploymentIdentityRefusal
+  type ApplicationDeletionSelection
 } from "@radius-project/core";
 
 // What the webview needs to decide whether to keep polling after a failed
@@ -199,7 +193,8 @@ export interface DeploymentsDependencies {
   // force-delete path in the UI.
   probeDeleteConflict(
     request: DeleteConflictRequest,
-    instanceId: string
+    instanceId?: string,
+    selection?: ApplicationDeletionSelection
   ): Promise<DeleteConflictProbe>;
   // Repair for an AWS deploy that could not sign in. The service decides from
   // this canvas's failed deploy which environment it repairs.
@@ -220,17 +215,6 @@ function record(value: unknown): Record<string, unknown> {
     return {};
   }
   return Object.fromEntries(Object.entries(value));
-}
-
-// The dispatch retry uses the same injected timer as the reservation lease, so a
-// test can drive both without real delays.
-function sleep(
-  dependencies: DeploymentsDependencies,
-  ms: number
-): Promise<void> {
-  return new Promise((resolve) => {
-    dependencies.setTimer(() => resolve(), ms);
-  });
 }
 
 // The branch the deploy pages resolve `app.bicep` against. The order is
@@ -577,389 +561,27 @@ export async function handleDeleteDeployment(
   context: CanvasRequestContext,
   dependencies: DeploymentsDependencies
 ): Promise<void> {
-  const { response } = context;
   const body = await context.readTextBody();
-  const respond = (code: number, payload: unknown): void => {
-    response.setHeader("Content-Type", "application/json");
-    response.writeHead(code);
-    response.end(JSON.stringify(payload));
-  };
-  let reservation: DeploymentDispatchLease | null = null;
-  let reservationOwner: CanvasState | null = null;
-  const releaseReservation = (): void => {
-    if (reservation && reservationOwner)
-      dependencies.releaseDeploymentMutation(reservationOwner, reservation);
-    reservation = null;
-    reservationOwner = null;
-  };
+  let result: Awaited<ReturnType<typeof requestApplicationDeletion>>;
   try {
-    const data = JSON.parse(body || "{}");
-    // `||` here is equivalent to `??`: every falsy value fails the `!repo`
-    // guard below either way, so those three mutants survive provably.
-    const repo = data.repo || "";
-    const environment = data.environment || "";
-    const application = data.application || "";
-    // Forcing is destructive beyond an ordinary delete — it removes records
-    // whose external resources may still exist — so only the exact boolean
-    // `true` enables it. A truthy string from a hand-made request does not.
-    const force = record(data).force === true;
-    for (const field of ["deploymentId", "runUrl"]) {
-      if (data[field] !== undefined && typeof data[field] !== "string") {
-        respond(400, { error: `${field} must be a string.` });
-        return;
-      }
-    }
-    if (
-      !repo ||
-      !environment ||
-      !application ||
-      !dependencies.isValidRepoSlug(repo)
-    ) {
-      respond(400, {
-        error: "A valid repo, environment, and application are required."
-      });
-      return;
-    }
-
-    const entry = dependencies.readInstanceEntry(context.instanceId);
-    if (!entry) {
-      respond(503, { error: "Canvas server state is unavailable." });
-      return;
-    }
-    const attempt = entry.state.deployAttempt;
-    const activeRepo = attempt?.targetRepo || entry.state.deployingRepo || "";
-    const activeEnvironment = attempt?.environment || entry.state.envName || "";
-    const reserved = dependencies.activeDeploymentMutation(entry.state);
-    if (dependencies.localDeploymentBlocksMutation(entry.state) || reserved) {
-      const operation = reserved?.kind || "deploy";
-      const conflictRepo = reserved?.repo || activeRepo || repo;
-      const conflictEnvironment =
-        reserved?.environment || activeEnvironment || environment;
-      respond(409, {
-        error: `A ${operation} operation for ${conflictRepo} in environment ${conflictEnvironment} is already in progress. Wait for it to finish before starting another operation.`
-      });
-      return;
-    }
-
-    reservationOwner = entry.state;
-    reservation = dependencies.reserveDeploymentMutation(entry.state, {
-      repo,
-      environment,
-      kind: "delete"
-    });
-    if (!reservation) {
-      const conflict = dependencies.activeDeploymentMutation(entry.state);
-      respond(409, {
-        error:
-          conflict ?
-            `A ${conflict.kind} operation for ${conflict.repo} in environment ${conflict.environment} is already starting.`
-          : "Another deployment operation is already starting."
-      });
-      return;
-    }
-    const invalidateDeletedDeployment = dependencies.captureDeletedDeployment(
-      entry.state,
-      { repo, environment, application }
+    const payload: unknown = JSON.parse(body || "{}");
+    result = await requestApplicationDeletion(
+      payload,
+      dependencies,
+      context.instanceId
     );
-
-    // Backstop the UI with GitHub's persisted state too. This covers a
-    // deployment started from another canvas instance or browser session.
-    let current: DeploymentRow | null;
-    try {
-      current = await dependencies.resolveEnvDeployment(
-        repo,
-        environment,
-        application
-      );
-    } catch {
-      releaseReservation();
-      respond(503, {
-        error:
-          "Could not verify the current deployment state. Check your GitHub connection and try again."
-      });
-      return;
-    }
-    const identityRefusal = deploymentIdentityRefusal(current, application, {
-      deploymentId: data.deploymentId,
-      runUrl: data.runUrl
-    });
-    if (identityRefusal) {
-      releaseReservation();
-      respond(identityRefusal.status, { error: identityRefusal.error });
-      return;
-    }
-    if (
-      current &&
-      dependencies.deploymentStatusBlocksMutation(current.status)
-    ) {
-      releaseReservation();
-      respond(409, {
-        error:
-          current.status === "deleting" ?
-            "This deployment is already being deleted."
-          : "This application is still being deployed to the selected environment. Wait for the deployment to finish before deleting it."
-      });
-      return;
-    }
-    // Forcing removes control-plane records whose external resources may still
-    // exist, so it is not an alternative way to run a first delete: it is only
-    // reachable as a retry of a delete GitHub already recorded as failed.
-    if (force && current?.status !== DELETE_FAILED_STATUS) {
-      releaseReservation();
-      respond(409, {
-        error:
-          "A delete can only be forced after a previous delete of this application failed. Run the delete normally first."
-      });
-      return;
-    }
-    // `delete-failed` alone is not proof: a delete can fail for credential,
-    // network or workflow-configuration reasons that forcing cannot fix and
-    // must not paper over. Forcing is only for a resource stranded in a
-    // non-terminal provisioning state, so re-read the failed run's artifact
-    // here rather than trusting the client's probe, which may be stale or
-    // absent entirely. Fails closed: anything but a proven conflict refuses.
-    if (force) {
-      let proof: DeleteConflictProbe;
-      try {
-        proof = await dependencies.probeDeleteConflict(
-          { repo, environment, application },
-          context.instanceId
-        );
-      } catch (error) {
-        releaseReservation();
-        respond(503, {
-          error: `The previous delete failure could not be verified, so this delete was not forced: ${errorMessage(error)}`
-        });
-        return;
-      }
-      if (proof.state !== "conflict") {
-        releaseReservation();
-        respond(409, {
-          error:
-            proof.state === "clear" ?
-              "The previous delete did not fail because a resource was stuck in a non-terminal state, so forcing would not help. Run the delete normally and address the reported failure."
-            : `The previous delete failure could not be verified, so this delete was not forced: ${proof.detail}`
-        });
-        return;
-      }
-    }
-
-    // Dispatching a workflow requires the `workflow` scope, which an injected
-    // GH_TOKEN often lacks. Retry with it stripped ONLY when that fallback is
-    // safe: the failure names the missing scope, and the dispatch did not time
-    // out (a timed-out dispatch may already have been accepted, and a retry
-    // would start a second delete run).
-    const ghWorkflow = async (args: string[]): Promise<CommandResult> => {
-      const first = await dependencies.runGh(args);
-      if (first.code === 0) return first;
-      const env = dependencies.readProcessEnv();
-      const retryAllowed = shouldRetryWithKeyringCredential({
-        stderr: first.stderr,
-        timedOut: first.timedOut,
-        hasInjectedToken: Boolean(
-          env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim()
-        )
-      });
-      if (!retryAllowed) return first;
-      const fallbackEnv = { ...env };
-      delete fallbackEnv.GH_TOKEN;
-      delete fallbackEnv.GITHUB_TOKEN;
-      const retry = await dependencies.runGh(args, 20000, fallbackEnv);
-      return retry.code === 0 ? retry : first;
-    };
-
-    // Deleting a deployment runs `rad app delete` via the committed
-    // delete-application.yml workflow. This tears down the Radius application on
-    // the ephemeral control plane while leaving the GitHub Environment (and its
-    // credentials) intact.
-    //
-    // Ensure the delete workflow files are in sync with upstream before
-    // dispatching, so the run never executes a drifted copy — and author them if
-    // they're missing (the #273 case). Delete workflow content is
-    // provider-agnostic, and workflow_dispatch runs from the default branch, so
-    // provider/workingBranch aren't needed.
-    const sync = await dependencies.ensureWorkflowsCurrent(
-      repo,
-      environment,
-      "",
-      [...dependencies.deleteApplicationWorkflowFiles]
-    );
-    // If the sync couldn't commit the dispatcher to the default branch (e.g.
-    // it's protected, or the token lacks write access), the dispatch below will
-    // 404 on a genuinely-absent workflow. Fail fast with a specific message
-    // naming the branch instead of the generic hint.
-    const commitFail = sync.failed.find(
-      (f) => f.path.split("/").pop() === DELETE_APP_DISPATCHER_FILE
-    );
-    if (commitFail) {
-      releaseReservation();
-      respond(400, {
-        error:
-          "Couldn't commit the delete workflow (" +
-          DELETE_APP_DISPATCHER_FILE +
-          ') to the "' +
-          commitFail.branch +
-          '" branch of ' +
-          repo +
-          ", so there's nothing to dispatch. The branch may be protected" +
-          " or your GitHub token may lack write access to " +
-          repo +
-          "."
-      });
-      return;
-    }
-    // A just-authored workflow isn't registered by GitHub synchronously, so an
-    // immediate workflow_dispatch would 404. When we created it, wait briefly
-    // and retry the not-found race a few times (mirroring the create-environment
-    // verify dispatch); when it was already present, the single [0]-delay
-    // attempt keeps the common path fast.
-    const justCreated = sync.created.some(
-      (p) => p.split("/").pop() === DELETE_APP_DISPATCHER_FILE
-    );
-    const dispatchedAt = Date.now();
-    const correlationId = `dep-${dependencies.id()}`;
-    if (
-      !/^dep-[a-zA-Z0-9-]{1,64}$/.test(correlationId) ||
-      `Radius - Delete ${environment} [radius:v1 app=${application}] ${correlationId}`
-        .length > 256
-    )
-      throw new Error(
-        "The delete identity cannot fit the supported run-title contract. No workflow was dispatched."
-      );
-    const dispatchArgs = [
-      "workflow",
-      "run",
-      DELETE_APP_DISPATCHER_FILE,
-      "-f",
-      "environment=" + environment,
-      "-f",
-      "application=" + application,
-      "-f",
-      "correlation_id=" + correlationId,
-      ...(force ? ["-f", "force=true"] : []),
-      "--repo",
-      repo
-    ];
-    let dispatch: CommandResult = { code: 1, stdout: "", stderr: "" };
-    // A `force` dispatch also has to survive the *input-schema* race: the
-    // dispatcher that was just committed or updated declares the `force` input,
-    // but GitHub answers 422 "unexpected inputs" until it has re-read the file
-    // from the default branch. Give that the same bounded retry the
-    // not-yet-registered workflow gets, rather than reporting a failure the
-    // user cannot act on.
-    const dispatchDelays = [0, 2000, 5000];
-    if (justCreated) await sleep(dependencies, 3000);
-    for (const delay of dispatchDelays) {
-      // `> 0` vs `> 1` is equivalent over the fixed delay set {0, 2000, 5000}:
-      // no member lies between the two thresholds.
-      if (delay > 0) await sleep(dependencies, delay);
-      dispatch = await ghWorkflow(dispatchArgs);
-      if (dispatch.code === 0) break;
-      if (dispatch.timedOut) break;
-      // Only the not-found registration race and the unexpected-input race
-      // self-resolve; any other failure (scope, Actions disabled, …) won't, so
-      // stop retrying.
-      if (
-        !/not found|HTTP 404/i.test(dispatch.stderr || "") &&
-        !/unexpected inputs?/i.test(dispatch.stderr || "")
-      ) {
-        break;
-      }
-    }
-    if (dispatch.code !== 0) {
-      releaseReservation();
-      const de = (dispatch.stderr || "").trim();
-      // `{0,20}` vs `{1,20}` differs only for the literal "workflowscope" with
-      // no separator, which no real `gh` diagnostic emits; left alive.
-      const ghCommandPresentation =
-        dependencies.ghCommandPresentation || BARE_GH_COMMAND_PRESENTATION;
-      const refreshCommand = displayGhCommand(ghCommandPresentation, [
-        "auth",
-        "refresh",
-        "-h",
-        "github.com",
-        "-s",
-        "workflow"
-      ]);
-      const installation =
-        ghCommandPresentation.installationNote ?
-          ` ${ghCommandPresentation.installationNote}`
-        : "";
-      // An exhausted unexpected-input retry is a stale dispatcher, not a
-      // permissions or Actions problem, so it says so instead of sending the
-      // user to check settings that are already correct.
-      const staleForceInput = /unexpected inputs?/i.test(de);
-      const hint =
-        staleForceInput ?
-          " GitHub is still rejecting " +
-          (force ? "the `force` input" : "the workflow inputs") +
-          ", which means the copy" +
-          " of " +
-          DELETE_APP_DISPATCHER_FILE +
-          " on the default branch of " +
-          repo +
-          " has not picked up that input yet. It is committed automatically," +
-          " so wait a moment and retry the forced delete."
-        : /workflow.{0,20}scope/i.test(de) ?
-          refreshCommand ?
-            ` Your GitHub token is missing the "workflow" scope. Run \`${refreshCommand}\` in a terminal, then retry.${installation}`
-          : ` Your GitHub token is missing the "workflow" scope. ${ghCommandPresentation.installationNote}`
-        : " The delete workflow is committed to the default branch" +
-          " automatically before dispatch, so a persistent failure usually" +
-          " means GitHub Actions is disabled for " +
-          repo +
-          " or the default branch is protected — check both and retry.";
-      respond(400, {
-        error:
-          "Failed to start the delete workflow (" +
-          DELETE_APP_DISPATCHER_FILE +
-          ") on " +
-          repo +
-          ". " +
-          (de || "The dispatch request failed.") +
-          hint
-      });
-      return;
-    }
-
-    // A workflow run can become discoverable before it creates its GitHub
-    // deployment record. Retain a short lease in either case to close that
-    // publication gap; after it expires, resolveEnvDeployment is the durable
-    // cross-instance guard.
-    const reservationTimer = dependencies.setTimer(
-      releaseReservation,
-      dependencies.deployListTtlMs * 2
-    );
-    reservationTimer.unref?.();
-    // A delete is now in flight, so the cached listing is stale — drop it so the
-    // next poll reflects the "Deleting…" state immediately.
-    dependencies.deployListCache.delete(repo);
-    invalidateDeletedDeployment();
-    let runUrl = "";
-    try {
-      const runId = await dependencies.findWorkflowRun(
-        repo,
-        DELETE_APP_DISPATCHER_FILE,
-        dispatchedAt,
-        null,
-        correlationId
-      );
-      if (runId)
-        runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
-    } catch (error) {
-      dependencies.logError(
-        "[radius delete] Dispatch accepted; run URL unavailable: " +
-          redactGhCredentials(
-            errorMessage(error),
-            dependencies.readProcessEnv()
-          ).slice(0, 2000)
-      );
-    }
-    respond(200, { success: true, runUrl, forced: force });
-  } catch (e) {
-    releaseReservation();
-    respond(400, { error: errorMessage(e) });
+  } catch (error) {
+    context.json(400, { error: errorMessage(error) });
+    return;
   }
+  if ("dispatchUnconfirmed" in result && result.dispatchUnconfirmed) {
+    context.json(result.status, {
+      error:
+        "GitHub may have accepted the delete workflow. Check Actions before trying again."
+    });
+    return;
+  }
+  context.json(result.status, result.body);
 }
 
 // Reports whether the last delete of an application failed with the stranded

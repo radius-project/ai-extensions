@@ -1,6 +1,6 @@
 ---
 name: radius-delete
-description: Delete a Radius application deployment, or delete a deploy environment and clean up its cloud state (Radius environment, Azure federated credential, GitHub environment, and private GHCR state package), via the Radius canvas. Use when the user asks to delete, remove, or tear down a deployed Radius application or a deploy environment.
+description: Delete a Radius application deployment, or delete an Azure deploy environment and clean up its cloud state (Radius environment, Azure federated credential, GitHub environment, and private GHCR state package). Use when the user asks to delete, remove, or tear down a deployed Radius application or a deploy environment.
 ---
 
 # Radius — Delete a Deployment or Environment
@@ -25,6 +25,12 @@ Before invoking this skill:
 3. Authenticated `gh` CLI access to dispatch workflows. The extension shells out to `gh`, which uses your stored GitHub credential (the keyring credential from `gh auth token`) and falls back to it when an injected token lacks the `workflow` scope — there is no separate extension-managed PAT to configure.
 
 ## How to invoke
+
+For an application in the current workspace repository, use `radius_delete_application` with the exact `repo`, `environment`, `application`, `deploymentId`, and `runUrl` from the current Radius deployment listing and `mode: "normal"`. Do not guess an ID or run URL. A dispatch is not a successful deletion: check the workflow outcome. If dispatch is unconfirmed, check GitHub Actions before retrying. Only use `mode: "force_retry"` for a known eligible stranded-resource conflict, with a separate trusted confirmation. The tool rechecks the conflict before dispatch and refuses missing or outdated workflows instead of rewriting them.
+
+Application deletion from chat uses the selected GitHub account and requires trusted host confirmation. The delete workflow rechecks the approved deployment inside the same concurrency group as deployment, before touching cloud state. If it cannot verify that the deployment is still current, refresh the deployment listing and confirm again. Missing confirmation is not approval; do not open Canvas silently or pass approval flags. To delete an environment, use the Canvas flow below.
+
+### Canvas
 
 Open the canvas hub and use the deployed-application view:
 

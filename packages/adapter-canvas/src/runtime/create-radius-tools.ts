@@ -461,6 +461,11 @@ export function createRadiusTools(
       ...declarationByName.get("radius_environment_control")!,
       handler: async (args: ToolArgs) =>
         JSON.stringify(await deps.environment.control(args))
+    },
+    {
+      ...declarationByName.get("radius_delete_application")!,
+      handler: async (args: ToolArgs) =>
+        JSON.stringify(await deps.deleteApplication(args))
     }
   ];
 }

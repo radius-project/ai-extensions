@@ -13,6 +13,8 @@ import * as core from "./index.js";
 // than as a settled contract; if that work does not land, they should be removed
 // along with these entries.
 const EXPECTED_FUNCTIONS = [
+  "deleteApplication",
+  "probeDeleteConflict",
   "GraphSourceError",
   "createGraphOrchestrator",
   "prepareGraph",
@@ -257,6 +259,9 @@ const EXPECTED_FUNCTIONS = [
 ] as const;
 
 const EXPECTED_VALUES = [
+  "DELETE_FAILED_STATUS",
+  "DELETE_RESULT_ARTIFACT",
+  "DELETE_RESULT_FILE",
   "ABANDONED_DEPLOYMENT_DESCRIPTION",
   "BARE_GH_COMMAND_PRESENTATION",
   "DEPLOYMENT_MONITOR_LIMITS",

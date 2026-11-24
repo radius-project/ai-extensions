@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve, sep } from "node:path";
+import { verifyApprovedDeployment } from "./approved-deployment.mjs";
 import {
   commandsMatchWorkflowApplication,
   literalWorkflowApplication
@@ -11,6 +12,25 @@ if (process.env.IDENTITY_KIND === "delete") {
     throw new Error(
       "The delete target is not a supported literal application name. No cloud work was started."
     );
+  await verifyApprovedDeployment(process.env, async (path) => {
+    if (!process.env.GH_TOKEN)
+      throw new Error(
+        "Deployment records are unavailable. No cloud work was started."
+      );
+    const response = await fetch(`https://api.github.com${path}`, {
+      headers: {
+        authorization: `Bearer ${process.env.GH_TOKEN}`,
+        accept: "application/vnd.github+json"
+      },
+      redirect: "error",
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!response.ok)
+      throw new Error(
+        "Could not read deployment records. No cloud work was started."
+      );
+    return response.json();
+  });
 } else if (application !== "unknown") {
   const workspace = resolve(process.env.GITHUB_WORKSPACE || ".");
   const appFile = process.env.MODEL_FILE || "";

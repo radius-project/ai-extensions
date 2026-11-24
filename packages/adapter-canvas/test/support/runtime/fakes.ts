@@ -365,6 +365,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       content: "fixture managed model",
       fromWorkspace: true
     })),
+    deleteApplication: vi.fn(async () => {
+      throw new Error("Application deletion was not scripted.");
+    }),
     environment: {
       start: vi.fn(async () => {
         throw new Error("Environment setup was not scripted.");

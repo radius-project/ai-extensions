@@ -29,6 +29,14 @@ on:
         required: false
         type: boolean
         default: false
+      approved_deployment_id:
+        description: 'Exact deployment ID approved for deletion'
+        type: string
+        required: false
+      approved_run_id:
+        description: 'Exact run ID associated with the approved deployment'
+        type: string
+        required: false
 
 permissions:
   id-token: write
@@ -38,6 +46,7 @@ permissions:
   # artifact describing the deleted application's last deployment. A called
   # workflow can never hold more permission than its caller.
   actions: write
+  deployments: read
 
 jobs:
   # Bind to the GitHub Environment so environment-scoped variables are visible, then
@@ -80,6 +89,8 @@ jobs:
       environment: ${{ inputs.environment || '{{ENV}}' }}
       resource_type: application
       name: ${{ inputs.application }}
+      approved_deployment_id: ${{ inputs.approved_deployment_id }}
+      approved_run_id: ${{ inputs.approved_run_id }}
       # The `inputs` context keeps a dispatch boolean as a boolean, while older
       # runners and `github.event.inputs` carry the string "true"/"false"
       # (actions/runner#1483). delete-azure.yml/delete-aws.yml declare `force`
@@ -96,6 +107,8 @@ jobs:
       environment: ${{ inputs.environment || '{{ENV}}' }}
       resource_type: application
       name: ${{ inputs.application }}
+      approved_deployment_id: ${{ inputs.approved_deployment_id }}
+      approved_run_id: ${{ inputs.approved_run_id }}
       # The `inputs` context keeps a dispatch boolean as a boolean, while older
       # runners and `github.event.inputs` carry the string "true"/"false"
       # (actions/runner#1483). delete-azure.yml/delete-aws.yml declare `force`

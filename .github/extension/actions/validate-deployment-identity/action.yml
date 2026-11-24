@@ -17,6 +17,15 @@ inputs:
   rad-commands:
     required: false
     description: Optional command override.
+  approved-deployment-id:
+    required: false
+    description: Deployment record approved by the chat user.
+  approved-run-id:
+    required: false
+    description: Workflow run attached to the approved deployment record.
+  github-token:
+    required: false
+    description: Read-only access to deployment records.
 runs:
   using: composite
   steps:
@@ -31,4 +40,7 @@ runs:
         MODEL_FILE: ${{ inputs.app-file }}
         TARGET_ENVIRONMENT: ${{ inputs.environment }}
         RAD_COMMANDS: ${{ inputs.rad-commands }}
+        APPROVED_DEPLOYMENT_ID: ${{ inputs.approved-deployment-id }}
+        APPROVED_RUN_ID: ${{ inputs.approved-run-id }}
+        GH_TOKEN: ${{ inputs.github-token }}
       run: node "$GITHUB_ACTION_PATH/validate.mjs"

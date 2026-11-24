@@ -553,6 +553,32 @@ describe("generateDeleteWorkflow", () => {
     expireTemplateCache();
   });
 
+  it("uses only the supplied template reader and does not fall back on unreadable source", async () => {
+    const ambientReads = h.fetches.length;
+    const readTemplate = vi.fn(async (_repo: string, path: string) => {
+      const file = path.split("/").pop() ?? "";
+      return (
+        Object.entries(BASE_UPSTREAM).find(([name]) => name === file)?.[1] ??
+        null
+      );
+    });
+    const workflow = await generateDeleteWorkflow("dev", { readTemplate });
+    expect(workflow["delete-environment.yml"]).toContain(
+      "delete-environment-azure.yml"
+    );
+    expect(readTemplate).toHaveBeenCalledWith(
+      "radius-project/ai-extensions",
+      ".github/extension/delete-environment-azure.yml",
+      "main"
+    );
+    expect(h.fetches).toHaveLength(ambientReads);
+    readTemplate.mockResolvedValue(null);
+    await expect(
+      generateDeleteWorkflow("dev", { readTemplate })
+    ).rejects.toThrow("canonical deletion template");
+    expect(h.fetches).toHaveLength(ambientReads);
+  });
+
   it("emits both dispatchers plus the app and environment Azure providers, never AWS", async () => {
     const files = await generateDeleteWorkflow("dev");
     expect(Object.keys(files).sort()).toEqual([
