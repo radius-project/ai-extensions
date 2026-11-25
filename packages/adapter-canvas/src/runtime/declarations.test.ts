@@ -133,7 +133,6 @@ describe("RU-03: tool declarations", () => {
       "radius_report_modeling_failure",
       "radius_generate_pr_diff_markdown",
       "radius_complete_app_authoring",
-      "radius_publish_custom_type_extension",
       "radius_publish_recipe",
       "radius_deploy",
       "radius_deploy_status",
@@ -316,10 +315,10 @@ describe("RU-03: tool declarations", () => {
         '1. Open the graph Canvas first, without checking for or generating app.bicep: open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph", repo: "<current-repo>" } }).'
       );
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "Let the Canvas detect a missing app.bicep and queue its automatic radius-app-bicep authoring handoff."
+        "Let the Canvas detect a missing app.bicep and queue its automatic radius-app-model authoring handoff."
       );
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "Do not inspect the workspace or poll to detect a missing model, and do not start missing-model generation independently through radius_generate_app, the radius-app-bicep skill, or a delegated agent."
+        "Do not inspect the workspace or poll to detect a missing model, and do not start missing-model generation independently through radius_generate_app, the radius-app-model skill, or a delegated agent."
       );
       expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
         "First, check whether"
@@ -343,7 +342,7 @@ describe("RU-03: tool declarations", () => {
 
     it("keeps explicitly requested model authoring available", () => {
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "When the user explicitly asks to create or update the application model, use radius_generate_app and follow the radius-app-bicep skill to completion."
+        "When the user explicitly asks to create or update the application model, use radius_generate_app and follow the radius-app-model skill to completion."
       );
     });
 
@@ -352,10 +351,10 @@ describe("RU-03: tool declarations", () => {
         "For that check, call get_graph_resources at most once; if ready is false, stop the reference check without waiting or retrying."
       );
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "Repair missing source references on a ready graph through the radius-app-graph skill's radius-app-bicep repair workflow."
+        "Repair missing source references on a ready graph through the radius-app-graph skill's missing-reference repair workflow."
       );
       expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
-        "poll for a missing model, call radius_generate_app or the radius-app-bicep skill"
+        "poll for a missing model, call radius_generate_app or the radius-app-model skill"
       );
     });
 

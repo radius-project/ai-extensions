@@ -3,7 +3,7 @@
 // {@link GitHub} port; the canvas adapter supplies the concrete `gh`-CLI
 // implementation.
 //
-// Source-code reference discovery is owned by the radius-app-bicep skill. The
+// Source-code reference discovery is owned by the radius-app-model skill. The
 // hard-coded heuristics that lived here have been removed in favor of that
 // agent-driven approach, which can adapt to any repo layout without maintaining
 // a static pattern list.

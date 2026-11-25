@@ -74,7 +74,6 @@ function modelStatus(
         : {
             generatedAt: "2026-08-11T05:32:32.000Z",
             sourceCommit: overrides.sourceCommit,
-            skillVersion: "0.1.0-test",
             radiusVersion: overrides.radiusVersion ?? "0.60",
             appBicepHash: "sha256:abc"
           }
@@ -95,7 +94,7 @@ const MODELABLE: AppSourceEvaluation = {
 };
 const UNMODELABLE: AppSourceEvaluation = { status: "none", dockerfiles: [] };
 // Stands in for the skill bootstrap each handoff embeds.
-const SKILL_HANDOFF = '{"skill":"radius-app-bicep","skillBase":"/plugin"}';
+const SKILL_HANDOFF = '{"skill":"radius-app-model","skillBase":"/plugin"}';
 const NODE_UNAVAILABLE_HANDOFF = JSON.stringify({
   nodeCommand: null,
   instruction: "Tell the user to install Node.js."
@@ -438,7 +437,7 @@ describe("createAppModelHandoff", () => {
     expect(beginManaged.mock.calls[2][4]).toBe(revision);
 
     beginManaged.mock.calls[2][7]?.(true);
-    status = "generator-changed";
+    status = "radius-version-changed";
     await handOff({ ...request, state: reopened });
     expect(sent).toHaveLength(4);
   });
@@ -2612,7 +2611,7 @@ describe("createAppModelHandoff", () => {
     const state: CanvasState = { canvasInstanceId: "radius-panel" };
     const skillHandoff = vi
       .fn<() => Promise<string>>()
-      .mockRejectedValueOnce(new Error("no usable radius-app-bicep skill"))
+      .mockRejectedValueOnce(new Error("no usable radius-app-model skill"))
       .mockResolvedValue(SKILL_HANDOFF);
     const { handOff, sent, logged } = harness({
       statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
@@ -2626,11 +2625,11 @@ describe("createAppModelHandoff", () => {
     };
 
     await expect(handOff(request)).rejects.toThrow(
-      "no usable radius-app-bicep skill"
+      "no usable radius-app-model skill"
     );
     expect(sent).toEqual([]);
     expect(logged).toEqual([
-      "Radius could not start application modeling. no usable radius-app-bicep skill"
+      "Radius could not start application modeling. no usable radius-app-model skill"
     ]);
     expect(state.appBicepHandoffKey).toBeUndefined();
     expect(state.appModelAttemptTokens?.["a/b::feat"]).toBeUndefined();
@@ -2649,7 +2648,7 @@ describe("createAppModelHandoff", () => {
       const state: CanvasState = {};
       const skillHandoff = vi
         .fn<() => Promise<string>>()
-        .mockRejectedValueOnce(new Error("no usable radius-app-bicep skill"))
+        .mockRejectedValueOnce(new Error("no usable radius-app-model skill"))
         .mockResolvedValue(SKILL_HANDOFF);
       const { handOff, sent, logged } = harness({
         statuses: {
@@ -2665,11 +2664,11 @@ describe("createAppModelHandoff", () => {
       };
 
       await expect(handOff(request)).rejects.toThrow(
-        "no usable radius-app-bicep skill"
+        "no usable radius-app-model skill"
       );
       expect(sent).toEqual([]);
       expect(logged).toEqual([
-        "Radius could not start application modeling. no usable radius-app-bicep skill"
+        "Radius could not start application modeling. no usable radius-app-model skill"
       ]);
       expect(state.appBicepHandoffKey).toBeUndefined();
 

@@ -10,6 +10,7 @@ import {
   deployFailureNoticePrompt,
   deployFailureNoticeDisplayPrompt,
   deployFailureNoticeMessage,
+  deployReadinessHandoffMessage,
   DEPLOY_ERROR_CHAR_CAP,
   appModelUnverifiedPrompt,
   appModelUnverifiedDisplayPrompt,
@@ -31,8 +32,8 @@ import { RADIUS_FAILURE_REPORT_CONTEXT } from "./declarations.js";
 // Stands in for the skill bootstrap the Canvas embeds in each modeling
 // handoff.
 const SKILL_HANDOFF = JSON.stringify({
-  skill: "radius-app-bicep",
-  skillBase: "/plugin/skills/radius-app-bicep",
+  skill: "radius-app-model",
+  skillBase: "/plugin/skills/radius-app-model",
   nodeCommand: "/usr/local/bin/node"
 });
 
@@ -88,7 +89,7 @@ describe("appBicepHandoffPrompt", () => {
     const msg = appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF, "graph");
     expect(msg).toContain("acme/widgets");
     expect(msg).toContain(SKILL_HANDOFF);
-    expect(msg).toContain("radius-app-bicep");
+    expect(msg).toContain("radius-app-model");
     expect(msg).toContain(".radius/app.bicep");
     expect(msg).toContain("working tree");
     expect(msg).toContain("graph");
@@ -172,35 +173,6 @@ describe("appBicepHandoffPrompt", () => {
     expect(appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF)).toContain(
       "recipe packs"
     );
-  });
-
-  it("lets modeling proceed without a selected deployment Environment", () => {
-    const msg = appBicepHandoffPrompt("acme/widgets", SKILL_HANDOFF, "graph", [
-      "feat"
-    ]);
-    expect(msg).toContain(
-      "This Canvas handoff supplies no deployment Environment contract."
-    );
-    expect(msg).toContain(
-      "Only when no Environment is named and no contract is supplied"
-    );
-    expect(msg).toContain(
-      "In that no-target case, missing Environment-registration evidence is not a permanent modeling failure."
-    );
-  });
-
-  it("states Environment independence before the permanent-failure callback", () => {
-    const msg = appBicepHandoffPrompt(
-      "acme/widgets",
-      SKILL_HANDOFF,
-      "graph",
-      ["feat"],
-      "app-graph",
-      { attemptToken: "tok", instanceId: "app-graph", branches: ["feat"] }
-    );
-    expect(
-      msg.indexOf("In that no-target case, missing Environment-registration")
-    ).toBeLessThan(msg.indexOf("radius_report_modeling_failure"));
   });
 
   it("names the selected branch in the opening line and gives cross-branch commit/push guidance", () => {
@@ -343,9 +315,9 @@ describe("appBicepHandoffDisplayPrompt", () => {
     // Guard the assertion itself: these tokens must really be in the agent
     // half, or "not.toContain" below would pass vacuously.
     expect(full).toContain(SKILL_HANDOFF);
-    expect(full).toContain("radius-app-bicep");
+    expect(full).toContain("radius-app-model");
     expect(display).not.toContain(SKILL_HANDOFF);
-    expect(display).not.toContain("radius-app-bicep");
+    expect(display).not.toContain("radius-app-model");
     expect(display).not.toContain("recipe pack");
   });
 });
@@ -407,7 +379,6 @@ function modelStatus(
         : {
             generatedAt: "2026-08-11T05:32:32.000Z",
             sourceCommit: overrides.sourceCommit,
-            skillVersion: "0.1.0-test",
             radiusVersion: "0.60",
             appBicepHash: "sha256:abc"
           }
@@ -442,44 +413,6 @@ describe("modeling skill handoff", () => {
   );
 });
 
-describe("modeling Environment context", () => {
-  it.each([
-    ["generate", () => appBicepHandoffPrompt("octo/app", SKILL_HANDOFF)],
-    [
-      "refresh",
-      () =>
-        appModelRefreshPrompt(modelStatus("octo/app", "feat"), SKILL_HANDOFF)
-    ],
-    [
-      "re-check",
-      () =>
-        appModelUnverifiedPrompt(modelStatus("octo/app", "feat"), SKILL_HANDOFF)
-    ]
-  ])(
-    "%s preserves user-supplied target checks instead of assuming no target",
-    (_name, prompt) => {
-      const text = prompt();
-
-      expect(text).toContain(
-        "If the user names a target Environment or supplies its contract"
-      );
-      expect(text).toContain(
-        "follow the skill's named-Environment checks for Recipe behavior and registration; do not bypass them."
-      );
-      expect(text).toContain(
-        "Only when no Environment is named and no contract is supplied"
-      );
-      expect(text).toContain(
-        "Azure Recipe evidence does not establish AWS Recipe behavior."
-      );
-      expect(text).not.toContain("No deployment Environment is selected");
-      expect(text).not.toContain(
-        "Do not require evidence that an Environment registers its Recipes"
-      );
-    }
-  );
-});
-
 describe("appModelRefreshPrompt", () => {
   const status = modelStatus("octo/app", "feat", {
     status: "source-changed",
@@ -495,9 +428,7 @@ describe("appModelRefreshPrompt", () => {
     expect(text).toContain(SKILL_HANDOFF);
     expect(text).toContain("predates the refresh");
     expect(text).toContain("Do not commit or push");
-    expect(text).toContain(
-      "In that no-target case, missing Environment-registration evidence is not a permanent modeling failure."
-    );
+    expect(text).toContain("starts from the existing model");
   });
 
   it("omits the repo phrase when the repo is unknown", () => {
@@ -549,7 +480,7 @@ describe("refreshRequestKey", () => {
     expect(refreshRequestKey(base)).not.toBe(
       refreshRequestKey(
         modelStatus("a/b", "feat", {
-          status: "generator-changed",
+          status: "radius-version-changed",
           requiresConfirmation: false
         })
       )
@@ -571,9 +502,6 @@ describe("appModelUnverifiedPrompt", () => {
     expect(text).toContain("ask whether they want the model regenerated");
     expect(text).toContain("would be lost");
     expect(text).toContain("Do not regenerate first");
-    expect(text).toContain(
-      "This Canvas handoff supplies no deployment Environment contract."
-    );
   });
 
   it("omits the repo phrase when the repo is unknown", () => {
@@ -671,17 +599,10 @@ describe("deployRepairHandoffPrompt", () => {
     expect(out).toContain("https://github.com/octo/app/actions/runs/42");
   });
 
-  it("does not supply graph-only Environment guidance during deploy repair", () => {
-    expect(
-      deployRepairHandoffPrompt("octo/app", "feat", failure)
-    ).not.toContain(
-      "This Canvas handoff supplies no deployment Environment contract."
-    );
-  });
-
   it("points at the tools that repair the model and redeploy", () => {
     const out = deployRepairHandoffPrompt("octo/app", "main", failure);
-    expect(out).toContain("radius-app-bicep");
+    expect(out).toContain("radius-app-complete skill");
+    expect(out).toContain("radius-app-model skill");
     expect(out).not.toContain("radius_generate_app");
     expect(out).toContain("radius_deploy");
     expect(out).toContain("radius_deploy_status");
@@ -931,5 +852,56 @@ describe("deployFailureNoticeMessage", () => {
     expect(message.displayPrompt).toBe(
       deployFailureNoticeDisplayPrompt("octo/app", "feat")
     );
+  });
+});
+
+describe("deployReadinessHandoffMessage", () => {
+  const plan = '{"skill":"radius-app-plan"}';
+  const complete = '{"skill":"radius-app-complete"}';
+
+  it("runs each needed stage in order, then pushes and hands Deploy back to the user", () => {
+    const { prompt, displayPrompt } = deployReadinessHandoffMessage({
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      steps: [
+        { skill: "radius-app-plan", handoff: plan },
+        { skill: "radius-app-complete", handoff: complete }
+      ]
+    });
+
+    expect(prompt).toContain("nothing was deployed");
+    expect(prompt).toContain('records stage "complete" and provider "azure"');
+    expect(prompt.indexOf("1. Plan the model for azure")).toBeLessThan(
+      prompt.indexOf(plan)
+    );
+    expect(prompt.indexOf(plan)).toBeLessThan(
+      prompt.indexOf("2. Make the model deployable")
+    );
+    expect(prompt.indexOf(complete)).toBeLessThan(
+      prompt.indexOf("3. Commit the files")
+    );
+    expect(prompt).toContain("push them to `feat`");
+    expect(prompt).toContain("4. Tell the user");
+    expect(prompt).toContain("Do not deploy it yourself.");
+    expect(displayPrompt).toBe(
+      "Making the application model for octo/app (branch `feat`) ready to deploy to azure."
+    );
+    expect(displayPrompt).not.toContain(complete);
+  });
+
+  it("asks only for Stage 3 when the model is already planned", () => {
+    const { prompt } = deployReadinessHandoffMessage({
+      repo: "octo/app",
+      branch: "main",
+      provider: "azure",
+      steps: [{ skill: "radius-app-complete", handoff: complete }]
+    });
+
+    expect(prompt).not.toContain("radius-app-plan");
+    expect(prompt).toContain("has not passed Stage 3.");
+    expect(prompt).toContain('it records stage "complete", skip');
+    expect(prompt).toContain("1. Make the model deployable");
+    expect(prompt).toContain("2. Commit the files");
   });
 });

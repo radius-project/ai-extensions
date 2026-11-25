@@ -23,6 +23,8 @@ import type {
   GraphSourceBindings
 } from "@radius-project/adapter-shared";
 import type { DeploymentToolsPorts } from "./deployment-tools.js";
+import type { RadiusSkillHandoff } from "../skill.js";
+import type { beginManagedRun } from "../app-model-staging.js";
 
 export interface WorkspaceContext {
   workspacePath: string;
@@ -93,19 +95,11 @@ export interface RadDependencies {
   ensureRadBinary(options: {
     log?: (message: string) => void;
   }): Promise<unknown>;
-  runRadBicepPublishExtension(options: {
-    fromFile: string;
-    target: string;
-    log?: (message: string) => void;
-    prepareSpawn?: () => Promise<void>;
-    beforeSpawn?: () => void;
-  }): Promise<unknown>;
   runRadBicepPublish(options: {
     file: string;
     target: string;
     env?: Record<string, string>;
     log?: (message: string) => void;
-    prepareSpawn?: () => Promise<void>;
     beforeSpawn?: () => void;
   }): Promise<unknown>;
 }
@@ -156,15 +150,6 @@ export interface PublishTargetsDependencies {
     workspacePath: string | null | undefined,
     value: unknown,
     fallback: string | null | undefined
-  ): string;
-  resolveRadiusArtifactTarget(
-    workspacePath: string | null | undefined,
-    value: unknown,
-    fallback: string | null | undefined
-  ): string;
-  resolveStagingDirPrefix(
-    workspacePath: string | null | undefined,
-    value: unknown
   ): string;
   validateGhcrTargetForRepo(
     target: unknown,
@@ -260,11 +245,9 @@ export interface ClockDependencies {
 
 // Facts needed to decide whether an existing application model still describes
 // the branch it sits on. Grouped into one narrow port so the freshness check has
-// a single seam: a graph open reads an origin record, a head commit, the installed
-// generator version, and the installed Radius version, and nothing else.
+// a single seam: a graph open reads an origin record, a head commit, and the
+// installed Radius version, and nothing else.
 export interface AppModelDependencies {
-  // Installed generator (radius-app-bicep) version, or "" when unresolvable.
-  generatorVersion(): string;
   // Radius version the installed Radius CLI compiles with, in the form the
   // origin record saves it (`0.60`), or "" when it cannot be resolved.
   radiusVersion(): Promise<string>;
@@ -349,8 +332,9 @@ export interface RadiusExtensionDependencies {
   process: ProcessDependencies;
   operations: OperationsDependencies;
   appModel: AppModelDependencies;
-  beginManagedModel: typeof import("../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs").beginManagedRun;
-  radiusAppBicepSkill(repoPath?: string, brief?: string): string;
+  beginManagedModel: typeof beginManagedRun;
+  // The JSON handoff that starts a Radius modeling skill (see skill.ts).
+  radiusSkillHandoff: RadiusSkillHandoff;
   renderPrDiffMarkdown(
     resources: CanvasGraphResource[],
     baseBranch: string,

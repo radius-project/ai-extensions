@@ -28,7 +28,6 @@ import {
   buildGraphViaRad,
   ensureRadBinary,
   resolveInstalledRadiusVersion,
-  runRadBicepPublishExtension,
   runRadBicepPublish,
   spawnRad,
   createDeploymentRepository,
@@ -91,16 +90,13 @@ import {
 } from "./operation-store.js";
 import { configureCredentialProvenanceStore } from "./credential-provenance.js";
 import { createFileCredentialProvenanceStore } from "./credential-provenance-store.js";
-import { radiusAppBicepSkill } from "./skill.js";
-import { beginManagedRun } from "../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
-import { createGeneratorVersionReader } from "./generator-version.js";
+import { radiusSkillHandoff } from "./skill.js";
+import { beginManagedRun } from "./app-model-staging.js";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.js";
 import { withGhcrDockerConfig } from "./ghcr.js";
 import { resolveGhCommandPresentation } from "./gh-command-resolution.js";
 import {
   resolveExistingRadiusArtifact,
-  resolveRadiusArtifactTarget,
-  resolveStagingDirPrefix,
   validateGhcrTargetForRepo
 } from "./publish-targets.js";
 import { createSessionHolder } from "./runtime/session.js";
@@ -245,7 +241,6 @@ const dependencies: RadiusExtensionDependencies = {
         RadiusExtensionDependencies["rad"]["buildGraphViaRad"]
       >,
     ensureRadBinary,
-    runRadBicepPublishExtension,
     runRadBicepPublish
   },
   sourceRefs: {
@@ -256,8 +251,6 @@ const dependencies: RadiusExtensionDependencies = {
   },
   publishTargets: {
     resolveExistingRadiusArtifact,
-    resolveRadiusArtifactTarget,
-    resolveStagingDirPrefix,
     validateGhcrTargetForRepo
   },
   hostCallbacks: {
@@ -277,7 +270,6 @@ const dependencies: RadiusExtensionDependencies = {
     setupInFlight
   },
   appModel: {
-    generatorVersion: createGeneratorVersionReader(),
     radiusVersion: createRadiusCliVersionReader(resolveInstalledRadiusVersion),
     workspaceHeadCommit,
     workspaceSourceRevision,
@@ -289,7 +281,7 @@ const dependencies: RadiusExtensionDependencies = {
     fetchRepoFile: (repo, branch, repoPath) =>
       fetchFileFromRepo(repo, repoPath, branch)
   },
-  radiusAppBicepSkill,
+  radiusSkillHandoff,
   beginManagedModel: beginManagedRun,
   renderPrDiffMarkdown,
   withGhcrDockerConfig: (fn) =>

@@ -88,7 +88,6 @@ export type Logger = (message: string) => void;
 
 interface SpawnManagedRadOptions extends SpawnRadOptions {
   log?: Logger;
-  prepareSpawn?: () => Promise<void>;
   beforeSpawn?: () => void;
 }
 
@@ -185,16 +184,6 @@ export interface BuildGraphViaRadOptions {
   cleanupRadArtifactsDir?: boolean;
 }
 
-/** Options for {@link runRadBicepPublishExtension}. */
-export interface RunRadBicepPublishExtensionOptions {
-  fromFile: string;
-  target: string;
-  log?: Logger;
-  timeout?: number;
-  prepareSpawn?: () => Promise<void>;
-  beforeSpawn?: () => void;
-}
-
 /** Options for {@link runRadBicepPublish}. */
 export interface RunRadBicepPublishOptions {
   file: string;
@@ -202,7 +191,6 @@ export interface RunRadBicepPublishOptions {
   env?: NodeJS.ProcessEnv;
   log?: Logger;
   timeout?: number;
-  prepareSpawn?: () => Promise<void>;
   beforeSpawn?: () => void;
 }
 
@@ -1008,12 +996,10 @@ async function spawnManagedRad(
     timeout = 120000,
     label = "rad",
     log = noop,
-    prepareSpawn,
     beforeSpawn
   }: SpawnManagedRadOptions = {}
 ): Promise<ProcessResult> {
   const radPath = await ensureRadBinary({ log });
-  if (prepareSpawn) await prepareSpawn();
   beforeSpawn?.();
   return await spawnRad(radPath, args, {
     cwd,
@@ -1025,61 +1011,11 @@ async function spawnManagedRad(
 }
 
 /**
- * Argument builders for the two publish commands. Exported so tests can assert
- * the exact rad CLI invocation without spawning a process.
+ * Argument builder for the publish command. Exported so tests can assert the
+ * exact rad CLI invocation without spawning a process.
  */
-export function bicepPublishExtensionArgs(
-  fromFile: string,
-  target: string
-): string[] {
-  return [
-    "bicep",
-    "publish-extension",
-    "--from-file",
-    fromFile,
-    "--target",
-    target,
-    "--force"
-  ];
-}
 export function bicepPublishArgs(file: string, target: string): string[] {
   return ["bicep", "publish", "--file", file, "--target", target];
-}
-
-/**
- * runRadBicepPublishExtension - compile a resource-type manifest into a local
- * Bicep extension via the managed rad binary:
- *   rad bicep publish-extension --from-file <manifest> --target <target> --force
- * `target` is a local file path (a .tgz), so this needs no registry auth.
- * Returns the resolved target path on success; throws with rad's output on
- * failure.
- */
-export async function runRadBicepPublishExtension({
-  fromFile,
-  target,
-  log = noop,
-  timeout = 120000,
-  prepareSpawn,
-  beforeSpawn
-}: RunRadBicepPublishExtensionOptions): Promise<string> {
-  const from = path.resolve(fromFile);
-  const to = path.resolve(target);
-  try {
-    await spawnManagedRad(bicepPublishExtensionArgs(from, to), {
-      cwd: path.dirname(to),
-      timeout,
-      label: "rad bicep publish-extension",
-      log,
-      prepareSpawn,
-      beforeSpawn
-    });
-    return to;
-  } catch (err) {
-    throw new Error(
-      `rad bicep publish-extension failed: ${radErrorDetail(err)}`,
-      { cause: err }
-    );
-  }
 }
 
 /**
@@ -1097,7 +1033,6 @@ export async function runRadBicepPublish({
   env = {},
   log = noop,
   timeout = 120000,
-  prepareSpawn,
   beforeSpawn
 }: RunRadBicepPublishOptions): Promise<string> {
   const src = path.resolve(file);
@@ -1108,7 +1043,6 @@ export async function runRadBicepPublish({
       timeout,
       label: "rad bicep publish",
       log,
-      prepareSpawn,
       beforeSpawn
     });
     return target;

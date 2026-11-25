@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { WorkspaceGraphBranchChanged } from "@radius-project/adapter-shared";
 import {
-  serializeAppOrigin,
   APP_ORIGIN_REPO_PATH,
   APP_ORIGIN_ROOT_PATH
 } from "@radius-project/core";
@@ -15,7 +14,6 @@ import type { CanvasState } from "../shared.js";
 
 const MODEL = "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
 const COMMIT = "a".repeat(40);
-const VERSION = "0.1.0-test";
 
 const WORKSPACE_STATE: CanvasState = {
   workspacePath: "/workspace",
@@ -28,25 +26,20 @@ const WORKSPACE_STATE: CanvasState = {
 function origin(
   overrides: {
     sourceCommit?: string;
-    skillVersion?: string;
     radiusVersion?: string;
     model?: string;
   } = {}
 ): string {
-  return serializeAppOrigin({
+  return JSON.stringify({
     generatedAt: "2026-08-11T05:32:32.000Z",
     sourceCommit: overrides.sourceCommit ?? COMMIT,
-    skillVersion: overrides.skillVersion ?? VERSION,
     radiusVersion: overrides.radiusVersion ?? "0.60",
     appBicepHash: hashAppBicep(overrides.model ?? MODEL)
   });
 }
 
 function helpers(options: Parameters<typeof createFakeDependencies>[0] = {}) {
-  const fake = createFakeDependencies({
-    generatorVersion: VERSION,
-    ...options
-  });
+  const fake = createFakeDependencies(options);
   fake.sessionHolder.set(createFakeSession());
   return {
     deps: fake.deps,
@@ -297,25 +290,6 @@ describe("resolveAppModelStatus", () => {
     ).rejects.toThrow("origin metadata unavailable");
   });
 
-  it("reports a generator upgrade against the installed version", async () => {
-    const { resolveAppModelStatus } = helpers({
-      generatorVersion: "0.2.0",
-      bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
-      filesByRepoBranch: {
-        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]: origin()
-      },
-      headCommits: { "workspace:/workspace": COMMIT }
-    });
-
-    const status = await resolveAppModelStatus(
-      "acme/widgets",
-      "main",
-      WORKSPACE_STATE
-    );
-
-    expect(status.freshness.status).toBe("generator-changed");
-  });
-
   it.each([
     ["a newer", "0.61", "radius-version-changed", true],
     ["an older", "0.59", "radius-cli-outdated", false]
@@ -434,24 +408,6 @@ describe("resolveAppModelStatus", () => {
     expect(deps.appModel.branchHeadCommit).not.toHaveBeenCalled();
     expect(deps.appModel.workspaceHeadCommit).not.toHaveBeenCalled();
     expect(deps.appModel.fetchWorkspaceFile).not.toHaveBeenCalled();
-  });
-
-  it("still reads the record on a branch it cannot diff, so a skill change is seen", async () => {
-    const { resolveAppModelStatus } = helpers({
-      generatorVersion: "0.2.0",
-      bicepByRepoBranch: { "remote:other/repo@release": MODEL },
-      filesByRepoBranch: {
-        [`remote:other/repo@release:${APP_ORIGIN_REPO_PATH}`]: origin()
-      }
-    });
-
-    const status = await resolveAppModelStatus(
-      "other/repo",
-      "release",
-      WORKSPACE_STATE
-    );
-
-    expect(status.freshness.status).toBe("generator-changed");
   });
 
   it("keeps a missing worktree model local even when GitHub has a model and origin", async () => {

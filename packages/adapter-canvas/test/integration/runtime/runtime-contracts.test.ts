@@ -13,12 +13,12 @@ import {
 import {
   APP_ORIGIN_REPO_PATH,
   UNIDENTIFIED_APPLICATION_MESSAGE,
-  UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
-  serializeAppOrigin
+  UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
 import { collectWorkflowFailure } from "@radius-project/core";
 import { hashAppBicep } from "../../../src/app-bicep-hash.js";
 import type { RadiusExtension } from "../../../src/runtime/create-radius-extension.js";
+import { MANAGED_RUN_INSTRUCTION } from "../../../src/runtime/canvas-model-authoring.js";
 import type {
   ProcessDependencies,
   RadiusExtensionDependencies
@@ -67,7 +67,6 @@ const TOOL_NAMES = [
   "radius_report_modeling_failure",
   "radius_generate_pr_diff_markdown",
   "radius_complete_app_authoring",
-  "radius_publish_custom_type_extension",
   "radius_publish_recipe",
   "radius_deploy",
   "radius_deploy_status",
@@ -76,9 +75,9 @@ const TOOL_NAMES = [
   "radius_environment_control"
 ];
 
-// The skillBase the fake radiusAppBicepSkill reports. A handoff that carries
+// The skillBase the fake radiusSkillHandoff reports. A handoff that carries
 // it embeds the skill bootstrap instead of asking the agent to call a tool.
-const SKILL_BASE = "/test/skills/radius-app-bicep";
+const SKILL_BASE = "/test/skills/radius-app-model";
 
 function parseSkillHandoff(value: unknown): Record<string, unknown> {
   if (typeof value !== "string") {
@@ -734,7 +733,7 @@ describe("P0-A Radius runtime registration contract", () => {
     expect(unrelated.session.send).not.toHaveBeenCalled();
     expect(unrelated.session.rpc.canvas.open).not.toHaveBeenCalled();
     expect(unrelated.deps.graphSources.read).not.toHaveBeenCalled();
-    expect(unrelated.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+    expect(unrelated.deps.radiusSkillHandoff).not.toHaveBeenCalled();
     expect(enabledResult?.additionalContext).toContain("radius-panel");
     expect(enabledResult?.additionalContext).toContain(
       "use the radius-report-issue skill"
@@ -1279,10 +1278,9 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
     const recordedAt = "a".repeat(40);
     const origin = (sourceCommit: string) =>
-      serializeAppOrigin({
+      JSON.stringify({
         generatedAt: "2026-08-11T05:32:32.000Z",
         sourceCommit,
-        skillVersion: "0.1.0-test",
         radiusVersion: "0.60",
         appBicepHash: hashAppBicep(model)
       });
@@ -1334,10 +1332,9 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     const model =
       "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
     const origin = (radiusVersion: string) =>
-      serializeAppOrigin({
+      JSON.stringify({
         generatedAt: "2026-08-11T05:32:32.000Z",
         sourceCommit: "a".repeat(40),
-        skillVersion: "0.1.0-test",
         radiusVersion,
         appBicepHash: hashAppBicep(model)
       });
@@ -1385,14 +1382,14 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       radiusVersion: "0.60",
       bicepByRepoBranch: { "workspace:acme/widgets@main": model },
       filesByRepoBranch: {
-        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]:
-          serializeAppOrigin({
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]: JSON.stringify(
+          {
             generatedAt: "2026-08-11T05:32:32.000Z",
             sourceCommit: "a".repeat(40),
-            skillVersion: "0.1.0-test",
             radiusVersion: "0.61",
             appBicepHash: hashAppBicep(model)
-          })
+          }
+        )
       },
       headCommits: { "workspace:/workspace": "b".repeat(40) },
       // The source moved too. The refresh it would normally ask for cannot
@@ -1427,7 +1424,6 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           {
             generatedAt: "2026-08-11T05:32:32.000Z",
             sourceCommit: "a".repeat(40),
-            skillVersion: "0.1.0-test",
             appBicepHash: hashAppBicep(model)
           },
           null,
@@ -1496,7 +1492,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     const tokenKey = `${repo}::main`;
     const stage = resolve(".radius", ".staging-managed-test");
     const node = resolve("test", "bin", "node");
-    const skillBase = resolve("test", "skills", "radius-app-bicep");
+    const skillBase = resolve("test", "skills", "radius-app-model");
     const stopInstruction = "Stop and ask the user to install Node.js.";
     const recipeArgs = {
       file: "service-recipe.bicep",
@@ -1519,7 +1515,6 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       const model =
         "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
       const source = { nodeAvailable, revision, selectionIsCurrent: true };
-      const artifact = vi.fn((name: string) => join(stage, name));
       const cancel = vi.fn();
       const assertBaseline = vi.fn();
       const promote = vi.fn<
@@ -1544,12 +1539,12 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
               bicepByRepoBranch: { "workspace:acme/widgets@main": model },
               filesByRepoBranch: {
                 [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]:
-                  serializeAppOrigin({
+                  JSON.stringify({
                     generatedAt: "2026-08-11T05:32:32.000Z",
                     sourceCommit: "a".repeat(40),
-                    skillVersion: "0.1.0-test",
                     radiusVersion: "0.60",
-                    appBicepHash: hashAppBicep(model)
+                    appBicepHash: hashAppBicep(model),
+                    stage: "model"
                   })
               },
               headCommits: { "workspace:/workspace": "b".repeat(40) },
@@ -1559,10 +1554,10 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         },
         (deps) => {
           deps.appModel.workspaceSourceRevision = async () => source.revision;
-          deps.radiusAppBicepSkill = () =>
+          deps.radiusSkillHandoff = () =>
             bootstrap ??
             JSON.stringify({
-              skill: "radius-app-bicep",
+              skill: "radius-app-model",
               skillBase,
               nodeCommand: source.nodeAvailable ? node : null,
               instruction:
@@ -1570,11 +1565,10 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
             });
           deps.beginManagedModel = () => ({
             stagingDir: stage,
-            artifact,
             cancel,
             assertBaseline,
             promote,
-            validate: (check) => check(join(stage, "app.bicep"))
+            validate: (check) => check(stage)
           });
           deps.process.runValidator = runValidator;
           if (publicationFilesExist) deps.process.existsSync = () => true;
@@ -1608,7 +1602,6 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         harness,
         state,
         source,
-        artifact,
         cancel,
         assertBaseline,
         promote,
@@ -1623,7 +1616,6 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
             isCurrent: () => source.selectionIsCurrent
           }),
         complete: tool("radius_complete_app_authoring"),
-        publishExtension: tool("radius_publish_custom_type_extension"),
         publishRecipe: tool("radius_publish_recipe"),
         currentToken: () => state.appModelAttemptTokens?.[tokenKey]
       };
@@ -1640,7 +1632,11 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       expect(harness.session.send).toHaveBeenCalledWith(
         expect.objectContaining({
           prompt: expect.stringContaining(
-            JSON.stringify({ requestToken, stagingDir: stage })
+            JSON.stringify({
+              requestToken,
+              stagingDir: stage,
+              instruction: MANAGED_RUN_INSTRUCTION
+            })
           )
         })
       );
@@ -1652,15 +1648,13 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         { model: "new", refresh: false },
         { model: "refreshed", refresh: true }
       ])(
-        "validates and promotes a $model model after managed publication",
+        "checks and promotes a $model model, refusing standalone publication meanwhile",
         async ({ refresh }) => {
           const fixture = await setup({ refresh });
           const {
             harness,
             handoff,
-            publishExtension,
             publishRecipe,
-            artifact,
             complete,
             runValidator,
             promote
@@ -1668,25 +1662,10 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           await handoff();
           const requestToken = expectHandoffToken(fixture);
 
-          await expect(publishExtension({})).resolves.toContain(
-            "active managed"
-          );
           await expect(publishRecipe(recipeArgs)).resolves.toContain(
             "active managed"
           );
-          expect(
-            harness.deps.rad.runRadBicepPublishExtension
-          ).not.toHaveBeenCalled();
           expect(harness.deps.rad.runRadBicepPublish).not.toHaveBeenCalled();
-          await expect(publishExtension({ requestToken })).resolves.toContain(
-            "custom-types.tgz"
-          );
-          expect(artifact).toHaveBeenCalledWith("custom-types.yaml", true);
-          expect(artifact).toHaveBeenCalledWith("custom-types.tgz", false);
-          await expect(
-            publishRecipe({ requestToken, ...recipeArgs })
-          ).resolves.toContain("Published recipe");
-          expect(artifact).toHaveBeenCalledWith("service-recipe.bicep", true);
 
           await expect(
             complete({ requestToken, outcome: "complete" })
@@ -1696,11 +1675,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           });
           expect(runValidator).toHaveBeenCalledWith(
             node,
-            [
-              join(skillBase, "scripts", "validate-bicep.mjs"),
-              join(stage, "app.bicep"),
-              "--managed-final"
-            ],
+            [join(skillBase, "scripts", "model.mjs"), "check", stage],
             expect.objectContaining({ cwd: "/workspace" })
           );
           expect(promote).toHaveBeenCalledOnce();
@@ -1897,191 +1872,36 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       });
     });
 
-    describe("publication preparation races", () => {
-      it.each(["recipe", "extension"] as const)(
-        "queues the second managed %s before it can read source and refuses promotion when it fails",
-        async (kind) => {
-          const fixture = await setup();
-          const { harness, source, releaseGates, handoff, complete, promote } =
-            fixture;
-          await handoff();
-          const requestToken = expectHandoffToken(fixture);
-          const reading = createDeferred<void>();
-          const releaseRead = createDeferred<void>();
-          releaseGates.push(releaseRead.resolve);
-          let hold = true;
-          const read = vi.fn(async () => {
-            if (hold) {
-              hold = false;
-              reading.resolve();
-              await releaseRead.promise;
-            }
-            return source.revision;
-          });
-          harness.deps.appModel.workspaceSourceRevision = read;
-
-          const rad = harness.deps.rad;
-          const effects: string[] = [];
-          async function spawn({
-            prepareSpawn,
-            beforeSpawn
-          }: {
-            prepareSpawn?: () => Promise<void>;
-            beforeSpawn?: () => void;
-          }) {
-            await prepareSpawn?.();
-            beforeSpawn?.();
-            if (effects.length === 0) {
-              effects.push("first");
-              return;
-            }
-            effects.push("second");
-            throw new Error("last writer failed");
-          }
-          if (kind === "recipe") {
-            rad.runRadBicepPublish = async (args) => {
-              await spawn(args);
-              return args.target;
-            };
-          } else {
-            rad.runRadBicepPublishExtension = spawn;
-          }
-          const publish =
-            kind === "recipe" ?
-              () => fixture.publishRecipe({ requestToken, ...recipeArgs })
-            : () => fixture.publishExtension({ requestToken });
-          const first = publish();
-          await reading.promise;
-          const second = publish();
-
-          const other =
-            kind === "recipe" ?
-              fixture.publishExtension({ requestToken })
-            : fixture.publishRecipe({ requestToken, ...recipeArgs });
-          await expect(other).resolves.toContain("Published");
-          expect(read).toHaveBeenCalledTimes(2);
-          expect(effects).toEqual([]);
-
-          const completion = complete({ requestToken, outcome: "complete" });
-          releaseRead.resolve();
-          await expect(first).resolves.toContain("Published");
-          await expect(second).resolves.toContain("last writer failed");
-          expect(effects).toEqual(["first", "second"]);
-          await expect(completion).resolves.toMatchObject({
-            kind: "refused",
-            error: expect.stringContaining("required Radius publication failed")
-          });
-          expect(promote).not.toHaveBeenCalled();
-        }
-      );
-
-      function holdRecipeCredentials({
+    describe("standalone Recipe publication", () => {
+      function holdPublisher({
         harness,
         releaseGates
       }: ManagedAuthoringFixture) {
         const started = createDeferred<void>();
         const ready = createDeferred<void>();
-        harness.deps.withGhcrDockerConfig = async (publish) => {
+        const spawn = vi.fn();
+        harness.deps.rad.runRadBicepPublish = async ({ beforeSpawn }) => {
           started.resolve();
           await ready.promise;
-          return publish({ DOCKER_CONFIG: "fixture-config" });
-        };
-        releaseGates.push(ready.resolve);
-        return { started: started.promise, release: ready.resolve };
-      }
-
-      function holdPublishers(
-        { harness, releaseGates }: ManagedAuthoringFixture,
-        count: number
-      ) {
-        const started = createDeferred<void>();
-        const ready = createDeferred<void>();
-        const spawn = vi.fn();
-        let preparing = 0;
-        const publish = async ({
-          prepareSpawn,
-          beforeSpawn
-        }: {
-          prepareSpawn?: () => Promise<void>;
-          beforeSpawn?: () => void;
-        }) => {
-          if (++preparing === count) started.resolve();
-          await ready.promise;
-          if (prepareSpawn) await prepareSpawn();
           beforeSpawn?.();
           spawn();
           return "published";
         };
-        harness.deps.rad.runRadBicepPublishExtension = publish;
-        harness.deps.rad.runRadBicepPublish = publish;
         releaseGates.push(ready.resolve);
         return { started: started.promise, release: ready.resolve, spawn };
       }
 
-      it.each([
-        {
-          name: "custom-type extension",
-          handler: "publishExtension",
-          args: {}
-        },
-        { name: "recipe", handler: "publishRecipe", args: recipeArgs }
-      ] as const)(
-        "refuses to spawn a $name publisher after the source changes",
-        async ({ handler, args }) => {
-          const fixture = await setup();
-          const { handoff, source } = fixture;
-          const publisher = holdPublishers(fixture, 1);
-          await handoff();
-          const requestToken = expectHandoffToken(fixture);
-
-          const publishing = fixture[handler]({ requestToken, ...args });
-          await publisher.started;
-          source.revision = "saved-source-2";
-          publisher.release();
-
-          await expect(publishing).resolves.toContain(
-            "source or worktree changed"
-          );
-          expect(publisher.spawn).not.toHaveBeenCalled();
-        }
-      );
-
-      it("refuses both managed publishers when cancelled before they spawn", async () => {
-        const fixture = await setup();
-        const { handoff, complete, publishExtension, publishRecipe } = fixture;
-        const publisher = holdPublishers(fixture, 2);
-        await handoff();
-        const requestToken = expectHandoffToken(fixture);
-
-        const publishing = [
-          publishExtension({ requestToken }),
-          publishRecipe({ requestToken, ...recipeArgs })
-        ];
-        await publisher.started;
-        await expect(
-          complete({ requestToken, outcome: "cancel" })
-        ).resolves.toEqual({ kind: "cancelled" });
-        publisher.release();
-
-        for (const result of await Promise.all(publishing)) {
-          expect(result).toContain("no longer current");
-        }
-        expect(publisher.spawn).not.toHaveBeenCalled();
-      });
-
-      it("refuses standalone publishers if managed authoring starts before they spawn", async () => {
+      it("refuses a standalone Recipe publisher if managed authoring starts before it spawns", async () => {
         const fixture = await setup({ publicationFilesExist: true });
-        const { handoff, publishExtension, publishRecipe } = fixture;
-        const publisher = holdPublishers(fixture, 2);
+        const { handoff, publishRecipe } = fixture;
+        const publisher = holdPublisher(fixture);
 
-        const publishing = [publishExtension({}), publishRecipe(recipeArgs)];
+        const publishing = publishRecipe(recipeArgs);
         await publisher.started;
         await handoff();
         publisher.release();
 
-        for (const result of await Promise.all(publishing)) {
-          expect(result).toContain("active managed");
-        }
+        await expect(publishing).resolves.toContain("active managed");
         expect(publisher.spawn).not.toHaveBeenCalled();
       });
 
@@ -2125,276 +1945,6 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           expect.stringContaining(recipeArgs.file),
           expect.stringContaining("new-recipe.bicep")
         ]);
-      });
-
-      it("refuses a managed recipe target outside the owning repository before preparing credentials", async () => {
-        const fixture = await setup();
-        const { harness, handoff, publishRecipe, artifact } = fixture;
-        await handoff();
-        const requestToken = expectHandoffToken(fixture);
-
-        await expect(
-          publishRecipe({
-            ...recipeArgs,
-            requestToken,
-            target: "br:ghcr.io/other/repo/recipe:v1"
-          })
-        ).resolves.toContain("must publish under the repository being modeled");
-        expect(harness.deps.withGhcrDockerConfig).not.toHaveBeenCalled();
-        expect(harness.deps.rad.runRadBicepPublish).not.toHaveBeenCalled();
-        expect(artifact).not.toHaveBeenCalled();
-      });
-
-      it("refuses recipe publication if the source changes during credential setup", async () => {
-        const fixture = await setup();
-        const { handoff, source, publishRecipe } = fixture;
-        const credentials = holdRecipeCredentials(fixture);
-        const publisher = holdPublishers(fixture, 1);
-        await handoff();
-        const requestToken = expectHandoffToken(fixture);
-
-        const publishing = publishRecipe({ requestToken, ...recipeArgs });
-        await credentials.started;
-        source.revision = "saved-source-2";
-        publisher.release();
-        credentials.release();
-
-        await expect(publishing).resolves.toContain(
-          "source or worktree changed"
-        );
-        expect(publisher.spawn).not.toHaveBeenCalled();
-      });
-
-      it.each([
-        ["custom-type extension", "publishExtension", {}],
-        ["recipe", "publishRecipe", recipeArgs]
-      ] as const)(
-        "refuses to spawn a %s publisher after a managed output is edited",
-        async (_, handler, args) => {
-          const fixture = await setup();
-          const { assertBaseline, handoff } = fixture;
-          const publisher = holdPublishers(fixture, 1);
-          await handoff();
-          const requestToken = expectHandoffToken(fixture);
-
-          const publishing = fixture[handler]({ requestToken, ...args });
-          await publisher.started;
-          assertBaseline.mockImplementationOnce(() => {
-            throw new Error(
-              "Managed model files changed while modeling: app.bicep."
-            );
-          });
-          publisher.release();
-
-          await expect(publishing).resolves.toContain(
-            "files changed while modeling"
-          );
-          expect(publisher.spawn).not.toHaveBeenCalled();
-        }
-      );
-
-      it.each([false, true])(
-        "holds a same-target successor through timeout cleanup (cancel queued request: %s)",
-        async (cancelQueued) => {
-          const fixture = await setup();
-          const {
-            assertBaseline,
-            complete,
-            handoff,
-            harness,
-            publishRecipe,
-            releaseGates
-          } = fixture;
-          const started = createDeferred<void>();
-          const cleanup = createDeferred<void>();
-          releaseGates.push(cleanup.resolve);
-          const spawn = vi.mocked(harness.deps.rad.runRadBicepPublish);
-          spawn.mockImplementationOnce(async () => {
-            started.resolve();
-            await cleanup.promise;
-            throw new Error("publisher timed out after tree cleanup");
-          });
-          await handoff();
-          const requestToken = expectHandoffToken(fixture);
-
-          const first = publishRecipe({ requestToken, ...recipeArgs });
-          await started.promise;
-          assertBaseline.mockClear();
-          const second = publishRecipe({ requestToken, ...recipeArgs });
-          const finishing = complete({ requestToken, outcome: "complete" });
-          expect(assertBaseline).not.toHaveBeenCalled();
-          expect(spawn).toHaveBeenCalledOnce();
-          if (cancelQueued) {
-            await expect(
-              complete({ requestToken, outcome: "cancel" })
-            ).resolves.toEqual({ kind: "cancelled" });
-          }
-          cleanup.resolve();
-
-          await expect(first).resolves.toContain(
-            "timed out after tree cleanup"
-          );
-          await expect(second).resolves.toContain(
-            cancelQueued ? "no longer current" : "Published recipe"
-          );
-          await expect(finishing).resolves.toMatchObject(
-            cancelQueued ?
-              {
-                kind: "refused",
-                error: expect.stringContaining("no longer current")
-              }
-            : { kind: "promoted", published: ["app.bicep"] }
-          );
-          expect(spawn).toHaveBeenCalledTimes(cancelQueued ? 1 : 2);
-        }
-      );
-
-      it("seals completion during recipe credential setup and waits for publication before promoting", async () => {
-        const fixture = await setup();
-        const {
-          handoff,
-          publishRecipe,
-          publishExtension,
-          complete,
-          runValidator,
-          promote
-        } = fixture;
-        const credentials = holdRecipeCredentials(fixture);
-        const publisher = holdPublishers(fixture, 1);
-        await handoff();
-        const requestToken = expectHandoffToken(fixture);
-
-        const publishing = publishRecipe({ requestToken, ...recipeArgs });
-        await credentials.started;
-        const settled = vi.fn();
-        const finishing = complete({ requestToken, outcome: "complete" }).then(
-          (result) => {
-            settled();
-            return result;
-          }
-        );
-        await expect(publishExtension({ requestToken })).resolves.toContain(
-          "already finalizing"
-        );
-        expect(settled).not.toHaveBeenCalled();
-        expect(runValidator).not.toHaveBeenCalled();
-        expect(promote).not.toHaveBeenCalled();
-
-        credentials.release();
-        await publisher.started;
-        expect(settled).not.toHaveBeenCalled();
-        expect(runValidator).not.toHaveBeenCalled();
-        publisher.release();
-
-        await expect(publishing).resolves.toContain("Published recipe");
-        await expect(finishing).resolves.toMatchObject({
-          kind: "promoted",
-          published: ["app.bicep"]
-        });
-        expect(publisher.spawn).toHaveBeenCalledOnce();
-        expect(runValidator).toHaveBeenCalledOnce();
-        expect(promote).toHaveBeenCalledOnce();
-      });
-
-      it("reports an unconfirmed exit, refuses promotion, and keeps the registry tag blocked for a replacement", async () => {
-        const fixture = await setup();
-        const { harness, handoff, publishRecipe, complete, promote } = fixture;
-        const spawn = vi.mocked(harness.deps.rad.runRadBicepPublish);
-        const unconfirmed = new RadProcessExitUnconfirmedError(
-          "rad bicep publish timed out",
-          "",
-          "fixture diagnostics"
-        );
-        spawn.mockRejectedValueOnce(
-          new Error(unconfirmed.message, { cause: unconfirmed })
-        );
-
-        await handoff();
-        const requestToken = expectHandoffToken(fixture);
-        await expect(
-          publishRecipe({ requestToken, ...recipeArgs })
-        ).resolves.toContain(
-          "Windows process-tree exit could not be confirmed"
-        );
-        await expect(
-          complete({ requestToken, outcome: "complete" })
-        ).resolves.toMatchObject({ kind: "refused" });
-        expect(promote).not.toHaveBeenCalled();
-
-        await handoff();
-        const replacement = expectHandoffToken(fixture);
-        expect(replacement).not.toBe(requestToken);
-        await expect(
-          publishRecipe({ requestToken: replacement, ...recipeArgs })
-        ).resolves.toContain("previous process tree");
-        expect(spawn).toHaveBeenCalledOnce();
-      });
-
-      it("does not use a successful case-variant tag to clear another tag's failure", async () => {
-        const fixture = await setup();
-        const { harness, handoff, publishRecipe, complete, promote } = fixture;
-        vi.mocked(harness.deps.rad.runRadBicepPublish).mockRejectedValueOnce(
-          new Error("first tag failed")
-        );
-        await handoff();
-        const requestToken = expectHandoffToken(fixture);
-        await expect(
-          publishRecipe({
-            requestToken,
-            ...recipeArgs,
-            target: "br:ghcr.io/acme/widgets/service:Test"
-          })
-        ).resolves.toContain("first tag failed");
-        await expect(
-          publishRecipe({
-            requestToken,
-            ...recipeArgs,
-            target: "br:ghcr.io/acme/widgets/service:test"
-          })
-        ).resolves.toContain("Published recipe");
-        await expect(
-          complete({ requestToken, outcome: "complete" })
-        ).resolves.toMatchObject({ kind: "refused" });
-        expect(promote).not.toHaveBeenCalled();
-      });
-
-      it("refuses completion without validating or promoting if admitted recipe publication fails", async () => {
-        const fixture = await setup();
-        const {
-          harness,
-          handoff,
-          publishRecipe,
-          complete,
-          runValidator,
-          promote,
-          cancel
-        } = fixture;
-        const credentials = holdRecipeCredentials(fixture);
-        vi.mocked(harness.deps.rad.runRadBicepPublish).mockRejectedValueOnce(
-          new Error("registry unavailable")
-        );
-        await handoff();
-        const requestToken = expectHandoffToken(fixture);
-
-        const publishing = publishRecipe({ requestToken, ...recipeArgs });
-        await credentials.started;
-        const finishing = complete({ requestToken, outcome: "complete" });
-        await expect(
-          complete({ requestToken, outcome: "complete" })
-        ).resolves.toMatchObject({
-          kind: "refused",
-          error: expect.stringContaining("already finalizing")
-        });
-        credentials.release();
-
-        await expect(publishing).resolves.toContain("registry unavailable");
-        await expect(finishing).resolves.toMatchObject({
-          kind: "refused",
-          error: expect.stringContaining("required Radius publication failed")
-        });
-        expect(runValidator).not.toHaveBeenCalled();
-        expect(promote).not.toHaveBeenCalled();
-        expect(cancel).toHaveBeenCalledOnce();
       });
     });
 
@@ -2443,9 +1993,6 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           handoff,
           state,
           source,
-          publishExtension,
-          publishRecipe,
-          artifact,
           complete,
           runValidator,
           promote
@@ -2470,23 +2017,6 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         expect(harness.session.send).toHaveBeenCalledTimes(2);
         const requestToken = expectHandoffToken(fixture);
 
-        await expect(publishExtension({})).resolves.toContain("active managed");
-        await expect(publishRecipe(recipeArgs)).resolves.toContain(
-          "active managed"
-        );
-        expect(
-          harness.deps.rad.runRadBicepPublishExtension
-        ).not.toHaveBeenCalled();
-        expect(harness.deps.rad.runRadBicepPublish).not.toHaveBeenCalled();
-        await expect(publishExtension({ requestToken })).resolves.toContain(
-          "custom-types.tgz"
-        );
-        expect(artifact).toHaveBeenCalledWith("custom-types.yaml", true);
-        expect(artifact).toHaveBeenCalledWith("custom-types.tgz", false);
-        await expect(
-          publishRecipe({ requestToken, ...recipeArgs })
-        ).resolves.toContain("Published recipe");
-        expect(artifact).toHaveBeenCalledWith("service-recipe.bicep", true);
         await expect(
           complete({ requestToken, outcome: "complete" })
         ).resolves.toMatchObject({
@@ -2495,11 +2025,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         });
         expect(runValidator).toHaveBeenCalledWith(
           node,
-          [
-            join(skillBase, "scripts", "validate-bicep.mjs"),
-            join(stage, "app.bicep"),
-            "--managed-final"
-          ],
+          [join(skillBase, "scripts", "model.mjs"), "check", stage],
           expect.objectContaining({ cwd: "/workspace" })
         );
         expect(promote).toHaveBeenCalledOnce();
@@ -2566,10 +2092,9 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     // Each look presents a record naming a different commit, which is what a
     // fresh regeneration produces.
     harness.deps.appModel.fetchWorkspaceFile = async () =>
-      serializeAppOrigin({
+      JSON.stringify({
         generatedAt: "2026-08-11T05:32:32.000Z",
         sourceCommit: String(commit).padStart(40, "0"),
-        skillVersion: "0.1.0-test",
         radiusVersion: "0.60",
         appBicepHash: hashAppBicep(model)
       });
@@ -2641,31 +2166,30 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
   });
 });
 
-it("blocks a case-variant compiler output after unconfirmed exit only on Windows", async () => {
+it("blocks a Recipe target after an unconfirmed exit and reports it at shutdown", async () => {
   const harness = await createRuntimeSdkHarness();
-  const compile = harness.extension.tools.find(
-    (tool) => tool.name === "radius_publish_custom_type_extension"
+  const publish = harness.extension.tools.find(
+    (tool) => tool.name === "radius_publish_recipe"
   );
-  if (!compile) throw new Error("Compilation tool not registered");
+  if (!publish) throw new Error("Recipe publication tool not registered");
   const run = vi
-    .fn(async () => {})
+    .fn(async () => "published")
     .mockRejectedValueOnce(
       new RadProcessExitUnconfirmedError("fixture exit unconfirmed", "", "")
     );
-  harness.deps.rad.runRadBicepPublishExtension = run;
+  harness.deps.rad.runRadBicepPublish = run;
+  const input = {
+    file: ".radius/cache-recipe.bicep",
+    target: "br:ghcr.io/acme/widgets/recipe:v1"
+  };
   try {
-    await expect(
-      compile.handler({ targetPath: ".radius/package.tgz" })
-    ).resolves.toContain("fixture exit unconfirmed");
-
-    const alias = await compile.handler({ targetPath: ".radius/Package.tgz" });
-    if (process.platform === "win32") {
-      expect(alias).toContain("previous process tree");
-      expect(run).toHaveBeenCalledOnce();
-    } else {
-      expect(alias).toContain("Published custom-type extension");
-      expect(run).toHaveBeenCalledTimes(2);
-    }
+    await expect(publish.handler(input)).resolves.toContain(
+      "fixture exit unconfirmed"
+    );
+    await expect(publish.handler(input)).resolves.toContain(
+      "previous process tree"
+    );
+    expect(run).toHaveBeenCalledOnce();
     await expect(harness.extension.shutdown("test")).resolves.toEqual({
       complete: false,
       exitCode: 1
@@ -2675,24 +2199,16 @@ it("blocks a case-variant compiler output after unconfirmed exit only on Windows
   }
 });
 
-it("routes registered publication tools without a Canvas panel", async () => {
+it("routes the registered Recipe publication tool without a Canvas panel", async () => {
   const harness = await createRuntimeSdkHarness();
-  const tools = harness.extension.tools;
-  const compile = tools.find(
-    (tool) => tool.name === "radius_publish_custom_type_extension"
+  const publish = harness.extension.tools.find(
+    (tool) => tool.name === "radius_publish_recipe"
   );
-  const publish = tools.find((tool) => tool.name === "radius_publish_recipe");
-  if (!compile || !publish) throw new Error("Publication tools not registered");
+  if (!publish) throw new Error("Recipe publication tool not registered");
   try {
     await expect(
-      compile.handler({ stagingDir: ".radius/.staging-fixture" })
-    ).resolves.toContain("custom-types.tgz");
-    expect(harness.deps.rad.runRadBicepPublishExtension).toHaveBeenCalledOnce();
-    expect(harness.deps.withGhcrDockerConfig).not.toHaveBeenCalled();
-
-    await expect(
       publish.handler({
-        file: ".radius/recipe.bicep",
+        file: ".radius/cache-recipe.bicep",
         target: "br:ghcr.io/other/repo/recipe:v1"
       })
     ).resolves.toContain("must publish under the repository being modeled");
@@ -2700,7 +2216,7 @@ it("routes registered publication tools without a Canvas panel", async () => {
 
     await expect(
       publish.handler({
-        file: ".radius/recipe.bicep",
+        file: ".radius/cache-recipe.bicep",
         target: "br:ghcr.io/acme/widgets/recipe:v1"
       })
     ).resolves.toContain("br:ghcr.io/acme/widgets/recipe:v1");
@@ -2770,7 +2286,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     const generated = await generateApp(harness);
     expect(generated).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
     expect(() => JSON.parse(String(generated))).toThrow();
-    expect(harness.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+    expect(harness.deps.radiusSkillHandoff).not.toHaveBeenCalled();
 
     // Nothing to model, so the agent is never asked to model it. The page states
     // the refusal itself rather than an authoring turn doing so.
@@ -2810,7 +2326,8 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
 
     // Not a refusal: the skill is still handed over so the services are modeled
     // as one application.
-    expect(harness.deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+    expect(harness.deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
       "/workspace",
       expect.any(String)
     );
@@ -2818,16 +2335,14 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       "skill",
       "repoPath",
       "skillBase",
-      "skillVersion",
       "nodeCommand",
       "instruction",
       "brief"
     ]);
     expect(handoff).toMatchObject({
-      skill: "radius-app-bicep",
+      skill: "radius-app-model",
       repoPath: "/workspace",
-      skillBase: "/test/skills/radius-app-bicep",
-      skillVersion: "0.1.0-test",
+      skillBase: "/test/skills/radius-app-model",
       nodeCommand: "/test/bin/node"
     });
     expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
@@ -2944,7 +2459,8 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     );
 
     expect(parseSkillHandoff(generated)).not.toHaveProperty("brief");
-    expect(harness.deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+    expect(harness.deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
       "/workspace/services/api",
       undefined
     );
@@ -3007,7 +2523,8 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     const generated = await generateApp(harness);
     expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
     expect(parseSkillHandoff(generated)).not.toHaveProperty("brief");
-    expect(harness.deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+    expect(harness.deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
       "/workspace",
       undefined
     );
@@ -3029,19 +2546,18 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       "skill",
       "repoPath",
       "skillBase",
-      "skillVersion",
       "nodeCommand",
       "instruction"
     ]);
     expect(handoff).toMatchObject({
-      skill: "radius-app-bicep",
+      skill: "radius-app-model",
       repoPath: "/workspace",
-      skillBase: "/test/skills/radius-app-bicep",
-      skillVersion: "0.1.0-test",
+      skillBase: "/test/skills/radius-app-model",
       nodeCommand: "/test/bin/node"
     });
     expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
-    expect(harness.deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+    expect(harness.deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
       "/workspace",
       undefined
     );
@@ -3055,15 +2571,15 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
         "acme/widgets@main": ["services/api/Dockerfile"]
       }
     });
-    vi.mocked(harness.deps.radiusAppBicepSkill).mockImplementation(() => {
+    vi.mocked(harness.deps.radiusSkillHandoff).mockImplementation(() => {
       throw new Error(
-        "Unable to locate a usable radius-app-bicep skill. Checked candidates: installed, source, repaired."
+        "Unable to locate a usable radius-app-model skill. Checked candidates: installed, source, repaired."
       );
     });
 
     try {
       await expect(generateApp(harness)).rejects.toThrow(
-        "Unable to locate a usable radius-app-bicep skill"
+        "Unable to locate a usable radius-app-model skill"
       );
     } finally {
       await harness.extension.shutdown("test");

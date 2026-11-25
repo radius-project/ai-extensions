@@ -1,16 +1,13 @@
 // What a repository's source listing says about whether it can be modeled.
 //
-// The MVP models containerized workloads only: every application workload is
-// built from a Dockerfile via `Radius.Compute/containerImages`. A repository
-// with no Dockerfile therefore has nothing this product can model, and modeling
-// it anyway produces an ambiguous failure late, after the agent has already been
-// handed the authoring instructions.
+// The canvas models only repositories that contain a Dockerfile, and refuses
+// the others before it hands off modeling. That rule is the canvas's own and is
+// stricter than the radius-app-model skill, which models published images when
+// there is no Dockerfile.
 //
-// The rule used to live only in the skill's prose, which made it a request the
-// agent could miss rather than something the product enforced. This module makes
-// it a decision: it owns the Dockerfile naming rule, the directories that are not
-// application source, the classification of a listing, and the single copy of the
-// user-facing message. Callers supply a file listing and nothing else, so the
+// This module owns the rule: the Dockerfile naming rule, the directories that
+// are not application source, the classification of a listing, and the single
+// copy of the user-facing message. Callers supply a file listing and nothing else, so the
 // same rule applies whether the listing came from the local worktree or from a
 // branch on GitHub.
 //

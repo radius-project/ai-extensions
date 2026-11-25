@@ -52,30 +52,17 @@ const SOURCE_PREVIEW = join(
   "assets",
   "preview.png"
 );
-const SOURCE_SKILL = join(
-  REPO_ROOT,
-  "extensions",
-  "radius",
-  "skills",
-  "radius-app-bicep"
-);
-const DIST_SKILL = join(DIST, "skills", "radius-app-bicep");
-const SOURCE_CODE_REFERENCE = join(
-  SOURCE_SKILL,
-  "references",
-  "source-code-references.md"
-);
-const DIST_CODE_REFERENCE = join(
-  DIST_SKILL,
-  "references",
-  "source-code-references.md"
-);
+const SOURCE_SKILLS = join(REPO_ROOT, "extensions", "radius", "skills");
+const DIST_SKILLS = join(DIST, "skills");
+const STAGE_SKILLS = [
+  "radius-app-model",
+  "radius-app-plan",
+  "radius-app-complete"
+] as const;
 const SOURCE_REF = execFileSync("git", ["rev-parse", "HEAD"], {
   cwd: REPO_ROOT,
   encoding: "utf8"
 }).trim();
-const LITERAL_CREDENTIAL_ASSIGNMENT =
-  /^\s*(?:[A-Za-z][A-Za-z0-9]*_)*(?:access_?key|api_?key|client_?secret|connection_?string|password|passwd|secret_?key|token)\s*:\s*(?:['"]|\{\s*value:\s*['"])/imu;
 // Independent reviewed oracle: unlike importing the live declaration builders,
 // this fixture changes only when a contract update is deliberately accepted.
 const EXPECTED_REGISTRATION = JSON.parse(
@@ -252,64 +239,6 @@ function assertCurrentArtifact(): void {
     );
   }
 }
-
-describe("packaged Bicep literal credential detector", () => {
-  it.each([
-    "PASSWORD",
-    "PASSWD",
-    "TOKEN",
-    "API_KEY",
-    "APP_API_KEY",
-    "CLIENT_SECRET",
-    "CONNECTION_STRING",
-    "SECRET_KEY",
-    "ACCESS_KEY",
-    "MYSQL_PASSWORD",
-    "accessKey",
-    "apiKey",
-    "clientSecret",
-    "connectionString",
-    "password",
-    "secretKey",
-    "token"
-  ])("rejects literal assignments to %s with optional prefixes", (key) => {
-    for (const prefix of ["", "APP_", "APP_V2_"]) {
-      for (const value of [
-        "'unsafe-example'",
-        '"unsafe-example"',
-        "{ value: 'unsafe-example' }",
-        '{\n  value: "unsafe-example"\n}'
-      ]) {
-        expect(`  ${prefix}${key}: ${value}`).toMatch(
-          LITERAL_CREDENTIAL_ASSIGNMENT
-        );
-      }
-      expect(`${prefix}${key}: { value: credentialParameter }`).not.toMatch(
-        LITERAL_CREDENTIAL_ASSIGNMENT
-      );
-      expect(
-        `${prefix}${key}: { valueFrom: { secretKeyRef: { secretName: credentials.name, key: 'credential' } } }`
-      ).not.toMatch(LITERAL_CREDENTIAL_ASSIGNMENT);
-    }
-  });
-
-  it.each([
-    "APP_PASSWORD_POLICY",
-    "APP_API_KEY_NAME",
-    "CLIENT_SECRET_FILE",
-    "CONNECTION_STRING_FORMAT",
-    "SECRET_KEY_ROTATION",
-    "ACCESS_KEY_ID",
-    "TOKEN_EXPIRY",
-    "PASSWD_LENGTH",
-    "NOTPASSWORD"
-  ])("allows noncredential configuration key %s", (key) => {
-    expect(`${key}: 'strict'`).not.toMatch(LITERAL_CREDENTIAL_ASSIGNMENT);
-    expect(`${key}: { value: 'strict' }`).not.toMatch(
-      LITERAL_CREDENTIAL_ASSIGNMENT
-    );
-  });
-});
 
 describe("JSONC module compatibility", () => {
   it.each(["playwright.config.ts", "playwright.visual.config.ts"])(
@@ -684,46 +613,47 @@ describe("P0-C built Radius extension artifact", () => {
       "assets/preview.png",
       ARTIFACT_RELATIVE_PATH,
       `${ARTIFACT_RELATIVE_PATH}.map`,
-      "skills/radius-app-bicep/SKILL.md",
-      "skills/radius-app-bicep/references/custom-resource-types.md",
-      "skills/radius-app-bicep/references/source-code-references.md",
-      "skills/radius-app-bicep/scripts/show-radius-type.mjs",
-      "skills/radius-app-bicep/scripts/promote-app-model.mjs",
-      "skills/radius-app-bicep/scripts/app-model-staging.mjs",
-      "skills/radius-app-bicep/scripts/validate-bicep.mjs",
-      "skills/radius-app-bicep/scripts/bicep-security-rules.mjs",
+      "skills/radius-app-model/SKILL.md",
+      "skills/radius-app-model/references/example.bicep",
+      "skills/radius-app-model/references/custom-types.md",
+      "skills/radius-app-model/scripts/common.mjs",
+      "skills/radius-app-model/scripts/model.mjs",
+      "skills/radius-app-model/scripts/types.mjs",
+      "skills/radius-app-plan/SKILL.md",
+      "skills/radius-app-plan/references/custom-recipes.md",
+      "skills/radius-app-plan/scripts/common.mjs",
+      "skills/radius-app-plan/scripts/plan.mjs",
+      "skills/radius-app-complete/SKILL.md",
+      "skills/radius-app-complete/references/wiring.md",
+      "skills/radius-app-complete/scripts/common.mjs",
+      "skills/radius-app-complete/scripts/complete.mjs",
+      "skills/radius-app-complete/scripts/recipe.mjs",
+      "skills/radius-app-complete/scripts/types.mjs",
       "skills/radius-report-issue/SKILL.md",
       "skills/radius-report-issue/references/bug-report.md"
     ];
     if (existsSync(SOURCE_CHANGELOG)) packagedPaths.push("CHANGELOG.md");
     for (const packagedPath of packagedPaths) {
-      expect(existsSync(join(DIST, ...packagedPath.split("/")))).toBe(true);
+      expect(
+        existsSync(join(DIST, ...packagedPath.split("/"))),
+        packagedPath
+      ).toBe(true);
     }
     expectMatchingFile(SOURCE_PREVIEW, join(DIST, "assets", "preview.png"));
-    const radiusTypeResolver = readFileSync(
-      join(
-        DIST,
-        "skills",
-        "radius-app-bicep",
-        "scripts",
-        "show-radius-type.mjs"
-      ),
-      "utf8"
+    // The installed plugin has no workspace packages beside it, so a skill
+    // script may import only Node built-ins and the scripts packaged with it.
+    const packagedScripts = filesUnder(DIST_SKILLS).filter((path) =>
+      path.endsWith(".mjs")
     );
-    expect(radiusTypeResolver).not.toContain("@radius-project/adapter-shared");
-    expect(radiusTypeResolver).not.toContain("packages/adapter-shared");
-    expect(radiusTypeResolver).toContain("Managed Radius version query");
-    expect(radiusTypeResolver).toContain(
-      "Recipe template does not match its OCI size and digest."
-    );
-    // The installed plugin has no workspace packages beside it, so every
-    // surviving import must be a Node builtin or the script fails at runtime.
-    const specifiers = [
-      ...radiusTypeResolver.matchAll(/\bfrom\s*"([^"]+)"/gu)
-    ].map((match) => match[1]);
-    expect(specifiers.length).toBeGreaterThan(0);
-    for (const specifier of specifiers) {
-      expect(specifier).toMatch(/^node:/u);
+    expect(packagedScripts.length).toBeGreaterThan(0);
+    for (const script of packagedScripts) {
+      for (const [, specifier] of readFileSync(script, "utf8").matchAll(
+        /\b(?:from|import)\s*\(?\s*["']([^"']+)["']/gu
+      )) {
+        if (specifier.startsWith("node:")) continue;
+        expect(specifier, script).toMatch(/^\.\/[\w-]+\.mjs$/u);
+        expect(existsSync(join(dirname(script), specifier)), script).toBe(true);
+      }
     }
     if (existsSync(SOURCE_CHANGELOG)) {
       expect(readFileSync(join(DIST, "CHANGELOG.md"), "utf8")).toBe(
@@ -810,26 +740,16 @@ describe("P0-C built Radius extension artifact", () => {
     expect(readFileSync(join(DIST, "LICENSE"), "utf8")).toBe(
       readFileSync(join(REPO_ROOT, "LICENSE"), "utf8")
     );
-    for (const sourceSkill of filesUnder(
-      join(REPO_ROOT, "extensions", "radius", "skills")
-    )) {
-      const relative = sourceSkill.slice(
-        join(REPO_ROOT, "extensions", "radius").length + 1
-      );
-      if (
-        relative.replaceAll("\\", "/") ===
-        "skills/radius-app-bicep/scripts/show-radius-type.mjs"
-      ) {
-        continue;
-      }
-      expect(readFileSync(join(DIST, relative), "utf8")).toBe(
-        readFileSync(sourceSkill, "utf8")
+    // Skill files ship verbatim, so the packaged skills tree is the source tree.
+    expect(relativeFilesUnder(DIST_SKILLS)).toEqual(
+      relativeFilesUnder(SOURCE_SKILLS)
+    );
+    for (const skillFile of relativeFilesUnder(SOURCE_SKILLS)) {
+      expectMatchingFile(
+        join(SOURCE_SKILLS, skillFile),
+        join(DIST_SKILLS, skillFile)
       );
     }
-    expect(relativeFilesUnder(DIST_SKILL)).toEqual(
-      relativeFilesUnder(SOURCE_SKILL)
-    );
-    expectMatchingFile(SOURCE_CODE_REFERENCE, DIST_CODE_REFERENCE);
     const notices = readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8");
     const canvasRoot = join(REPO_ROOT, "packages", "adapter-canvas");
     const graphRoot = join(REPO_ROOT, "packages", "graph-react");
@@ -850,283 +770,6 @@ describe("P0-C built Radius extension artifact", () => {
     }
     expect(notices).not.toContain("===== reactflow@");
     expect(notices).not.toContain("===== @reactflow/");
-  });
-
-  it("starts and aborts staged modeling using only the packaged skill assets", () => {
-    const workspace = mkdtempSync(join(tmpdir(), "radius-packaged-staging-"));
-    try {
-      const script = join(DIST_SKILL, "scripts", "promote-app-model.mjs");
-      const radius = join(workspace, ".radius");
-      const run = (args: string[]) =>
-        spawnSync(process.execPath, [script, "--radius-dir", radius, ...args], {
-          cwd: workspace,
-          encoding: "utf8",
-          timeout: 5_000
-        });
-      const started = run(["--begin", "--run-id", "artifact"]);
-      expect(started.stderr).toBe("");
-      expect(started.status).toBe(0);
-      const staging = started.stdout.trim();
-      expect(existsSync(join(staging, "run.json"))).toBe(true);
-      expect(run(["--abort", "--staging", staging]).status).toBe(0);
-      expect(existsSync(staging)).toBe(false);
-    } finally {
-      rmSync(workspace, { recursive: true, force: true });
-    }
-  });
-
-  it("packages environment-independent authoring so a missing deploy Environment cannot block modeling", () => {
-    assertCurrentArtifact();
-    const readGuidance = (relativePath: string): string =>
-      readFileSync(join(DIST_SKILL, relativePath), "utf8");
-    const skillGuidance = readGuidance("SKILL.md");
-    const runtimeGuidance = readGuidance("references/runtime-contract.md");
-
-    // Regression guard for #962: #637 made target-Environment registration a
-    // pre-authoring stop, which blocked every graph opened before deployment.
-    for (const guidance of filesUnder(DIST_SKILL)
-      .filter((path) => path.endsWith(".md"))
-      .map((path) => readFileSync(path, "utf8"))) {
-      expect(guidance).not.toContain(
-        "target-Environment registration required by the model is unavailable"
-      );
-      expect(guidance).not.toContain(
-        "Also prove that the target Environment registers every emitted type"
-      );
-    }
-    expect(skillGuidance).toContain(
-      "### Authoring evidence and deployment readiness"
-    );
-    expect(skillGuidance).toContain(
-      "When no Environment is named and no contract is supplied, a missing, unselected, or unprovisioned deployment Environment is not a permanent modeling failure."
-    );
-    expect(skillGuidance).toContain(
-      "Only when no deployment Environment is named and no Environment contract is supplied, missing Environment-registration evidence is not a failure of either kind."
-    );
-    expect(runtimeGuidance).toContain(
-      "Only when no Environment is named and no contract is supplied, a missing or unselected deployment Environment is not a reason to reject the model."
-    );
-    expect(skillGuidance).toContain(
-      "Missing evidence for that named target remains an authoring blocker"
-    );
-    expect(skillGuidance).toContain(
-      "it does not establish AWS Recipe behavior"
-    );
-    expect(skillGuidance).toContain("do not substitute Azure evidence");
-    expect(skillGuidance).toContain(
-      "For generated custom types, inspect the authored Recipe and its pack"
-    );
-    expect(runtimeGuidance).toContain(
-      "registration of a required Recipe in a named target Environment cannot be proved"
-    );
-    expect(runtimeGuidance).toContain(
-      "an explicit target profile still requires its own exact Recipe behavior"
-    );
-  });
-
-  it("packages the managed-secret modeling contract in executable examples and platform rules", () => {
-    assertCurrentArtifact();
-    const readGuidance = (relativePath: string): string =>
-      readFileSync(join(DIST_SKILL, relativePath), "utf8");
-    const bicepBlocks = filesUnder(DIST_SKILL)
-      .filter((path) => path.endsWith(".md"))
-      .flatMap((path) => [
-        ...readFileSync(path, "utf8").matchAll(
-          /```bicep\r?\n([\s\S]*?)\r?\n```/gu
-        )
-      ])
-      .map((match) => match[1]);
-
-    const todoExample = readGuidance("references/todo-list-app-example.md");
-    const mysqlExample = bicepBlocks.find(
-      (block) =>
-        block.includes("resource mysqlCredentials 'Radius.Security/secrets") &&
-        block.includes("source: mysql.id") &&
-        block.includes("source: mysqlCredentials.id")
-    );
-    expect(mysqlExample).toBeDefined();
-    expect(mysqlExample).toMatch(/password:\s*\{\s*value:\s*password\s*\}/u);
-    expect(mysqlExample).toMatch(
-      /mysql:\s*\{\s*source:\s*mysql\.id\s*\}\s*mysqlSecret:\s*\{\s*source:\s*mysqlCredentials\.id/u
-    );
-    expect(todoExample).toMatch(
-      /MYSQL_PASSWORD:\s*\{\s*valueFrom:\s*\{\s*secretKeyRef:\s*\{\s*secretName:\s*mysqlClientCredentials\.name\s*key:\s*'password'/u
-    );
-    expect(todoExample).toContain(
-      "The same `mysqlPassword` parameter supplies the MySQL resource's schema-defined sensitive input"
-    );
-    expect(todoExample).toContain(
-      "no authored-Secret connection migration is implied"
-    );
-
-    const connectionGuidance = readGuidance(
-      "references/connection-conventions.md"
-    );
-    const structureGuidance = readGuidance(
-      "references/bicep-structure-rules.md"
-    );
-    const secretsGuidance = readGuidance("references/secrets-handling.md");
-    const runtimeGuidance = readGuidance("references/runtime-contract.md");
-    const skillGuidance = readGuidance("SKILL.md");
-    const redisExample = bicepBlocks.find(
-      (block) =>
-        block.includes("redis:") && block.includes("source: redisCache.id")
-    );
-    expect(redisExample).toBeDefined();
-    expect(redisExample).not.toMatch(
-      /Radius\.Security\/secrets|properties\.secrets\.name/u
-    );
-    expect(connectionGuidance).toContain(
-      "If the Redis Recipe declares `url` in `result.secrets`, the connection injects secret-backed `CONNECTION_REDIS_URL`"
-    );
-    expect(connectionGuidance).toContain(
-      "If the supplied compatibility context does not explicitly establish support, preserve or use the existing schema-supported wiring"
-    );
-    expect(connectionGuidance).toContain(
-      "Do not automatically rewrite an existing working `app.bicep`"
-    );
-    expect(connectionGuidance).toContain(
-      "Azure Container Instances (ACI) behavior is unchanged and must not use this Kubernetes projection"
-    );
-    expect(connectionGuidance).toContain(
-      "An explicit `env` entry wins over a generated variable with the same name"
-    );
-    expect(connectionGuidance).toContain(
-      "Set `disableDefaultEnvVars: true` on a connection only when all generated variables from that connection must be suppressed"
-    );
-    expect(skillGuidance).toContain(
-      "`postgresSecret` becomes `POSTGRESSECRET`"
-    );
-    // This artifact-boundary test verifies the packaged semantic guidance only.
-    // The repo has no deterministic seam that executes the prompt-driven skill
-    // or evaluates its generated Bicep; https://github.com/radius-project/ai-extensions/issues/685 tracks that evaluation harness.
-    for (const guidance of [
-      skillGuidance,
-      connectionGuidance,
-      runtimeGuidance
-    ]) {
-      expect(guidance).toContain(
-        "Do not execute `rad`, fetch versions or Recipe metadata, or visit external links to discover compatibility"
-      );
-      expect(guidance).not.toContain("rad version --output json");
-      expect(guidance).not.toContain("rad recipe show");
-    }
-    expect(skillGuidance).toContain(
-      'the required managed `show-radius-type.mjs` result for `Radius.Compute/containers` has `recipe.status: "available"` and its returned `recipe.definition` identifies the Kubernetes Container Recipe'
-    );
-    expect(connectionGuidance).toContain(
-      "Support is established when `recipe.status` is `available` and the returned `recipe.definition` identifies the Kubernetes Container Recipe"
-    );
-    expect(runtimeGuidance).toContain(
-      "For the managed-default profile, Recipe inspection means reading the complete `recipe.definition` already returned by the required `show-radius-type.mjs` batch"
-    );
-    expect(skillGuidance).toContain(
-      "The skill handoff itself and a resolved resource schema alone do not establish runtime projection support"
-    );
-    expect(connectionGuidance).toContain(
-      "The skill handoff itself and a resolved resource schema alone are insufficient"
-    );
-    expect(skillGuidance).toContain(
-      "If the Recipe is absent, unavailable, unresolved, or not the Kubernetes Container Recipe, preserve schema-supported `env`, `secretKeyRef`, `envFrom`, native variables, or equivalent explicit wiring"
-    );
-    expect(skillGuidance).toContain(
-      "`<CONNECTION>` is the uppercased connection map key without separator insertion"
-    );
-    expect(connectionGuidance).toContain(
-      "`<CONNECTION>` is the uppercased connection map key without separator insertion"
-    );
-    expect(skillGuidance).toContain(
-      "`<SECRETKEY>` is the uppercased authored Secret data key or Recipe `result.secrets` key"
-    );
-    expect(connectionGuidance).toContain(
-      "a secret suffix is the uppercased authored data key or Recipe `result.secrets` key"
-    );
-    expect(skillGuidance).toContain(
-      "The Kubernetes Container Recipe applies generated ordinary and secret-backed `CONNECTION_*` variables to both regular containers and init containers under the same precedence, disabling, and collision rules"
-    );
-    expect(connectionGuidance).toContain(
-      "Generated ordinary and secret-backed `CONNECTION_*` variables apply to both regular containers and init containers under the same precedence, disabling, and collision rules"
-    );
-    expect(skillGuidance).toContain(
-      "Do not migrate a working `app.bicep` without explicit user intent"
-    );
-    expect(connectionGuidance).toContain(
-      "Do not automatically rewrite an existing working `app.bicep`"
-    );
-    expect(skillGuidance).toContain(
-      "An authored `Radius.Security/secrets` connection uses `<secret>.id` and projects its declared data keys"
-    );
-    expect(connectionGuidance).toContain(
-      "A connection to an authored `Radius.Security/secrets` resource uses `<secret>.id` and projects its declared data keys"
-    );
-    expect(skillGuidance).toContain(
-      "A producer connection uses `<producer>.id` and may project ordinary properties plus keys declared by the Recipe in `result.secrets`"
-    );
-    expect(connectionGuidance).toContain(
-      "A connection to a producer uses `<producer>.id` and may project ordinary resource properties plus secret-backed keys declared by the Recipe in `result.secrets`"
-    );
-    for (const guidance of [skillGuidance, connectionGuidance]) {
-      expect(guidance).toContain(
-        "Automatic secret-backed `CONNECTION_*` projection is Kubernetes Container Recipe behavior only"
-      );
-      expect(guidance).toContain("<secret>.id");
-      expect(guidance).toContain("<producer>.id");
-      expect(guidance).toContain("`result.secrets`");
-      expect(guidance).toContain("`<producer>.properties.secrets.name`");
-      expect(guidance).toContain("`properties.secrets.id` does not exist");
-      expect(guidance).toContain(
-        "An explicit `env` entry wins over a generated variable"
-      );
-      expect(guidance).toContain(
-        "`disableDefaultEnvVars: true` suppresses all generated variables for that connection"
-      );
-      expect(guidance).toContain(
-        "When an ordinary projected property and a managed secret-derived value normalize to the same generated name, the managed secret value wins"
-      );
-      expect(guidance).toContain(
-        "When two secret-derived values normalize to the same generated name, fail rather than choose silently"
-      );
-      expect(guidance).not.toMatch(
-        /Normalized generated-name collisions fail|Generated names that collide after normalization fail/u
-      );
-      expect(guidance).toMatch(
-        /generated by a Recipe[\s\S]*`result\.secrets`/u
-      );
-      expect(guidance).toContain(
-        "Azure Container Instances (ACI) behavior is unchanged and must not use this Kubernetes projection"
-      );
-      expect(guidance).not.toMatch(
-        /github\.com\/radius-project\/(?:radius|resource-types-contrib)\/(?:pull|issues)\//u
-      );
-    }
-    expect(connectionGuidance).toContain("Developer-owned credentials");
-    expect(secretsGuidance).toContain("`CONNECTION_MYSQLSECRET_PASSWORD`");
-    for (const guidance of [
-      connectionGuidance,
-      structureGuidance,
-      runtimeGuidance,
-      secretsGuidance
-    ]) {
-      expect(guidance).toContain("`@secure()`");
-      expect(guidance).toContain("`env.value`");
-      expect(guidance).toMatch(/explicit|legacy/u);
-      expect(guidance).toContain("fallback");
-      expect(guidance).toContain("generated Pod specification");
-    }
-    for (const guidance of [
-      connectionGuidance,
-      structureGuidance,
-      runtimeGuidance
-    ]) {
-      expect(guidance).toMatch(
-        /secretKeyRef[^\n]*<secret>\.name[^\n]*(?:native variable|compatibility fallback)/u
-      );
-    }
-
-    expect(bicepBlocks.length).toBeGreaterThan(0);
-    for (const block of bicepBlocks) {
-      expect(block).not.toMatch(LITERAL_CREDENTIAL_ASSIGNMENT);
-    }
   });
 
   it("keeps continuation and missing-model ownership consistent across shipped graph instructions", () => {
@@ -1155,550 +798,81 @@ describe("P0-C built Radius extension artifact", () => {
       expect(guidance).toMatch(/canvas[^\n]*authoring handoff/iu);
     }
     expect(graphGuidance).toContain(
-      "run the `radius-app-bicep` skill as a repair of the existing model"
+      "run the `radius-app-model` skill on the existing model"
     );
   });
 
-  it("packages fail-closed guidance for developer rad resolution failures", () => {
+  it("packages the graph skill's fail-closed guidance for rad failures", () => {
     assertCurrentArtifact();
-    const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
     const graphGuidance = readFileSync(
-      join(DIST, "skills", "radius-app-graph", "SKILL.md"),
+      join(DIST_SKILLS, "radius-app-graph", "SKILL.md"),
       "utf8"
     );
 
-    expect(skillGuidance).toMatch(
-      /show-radius-type\.mjs` fails while locating, querying, or validating[^\n]*stop the modeling run, report the exact error, and follow \[When a step fails\]/u
+    expect(graphGuidance).toMatch(
+      /never (?:download|install).*(?:rename|back up).*(?:delete|replace) a `rad` binary/isu
     );
-    expect(skillGuidance).toMatch(
-      /This includes a missing binary, invalid or incomplete version JSON, a missing or unsupported stamped release identity, a noncanonical commit, and a pull-request release, for which no Radius Bicep types are published\./u
+    expect(graphGuidance).toMatch(
+      /never change or unset `RADIUS_RAD_BINARY` or `RADIUS_RAD_SKIP_VERSION_CHECK`/iu
     );
-    for (const guidance of [skillGuidance, graphGuidance]) {
-      expect(guidance).toMatch(
-        /never (?:download|install).*(?:rename|back up).*(?:delete|replace) a `rad` binary/isu
-      );
-      expect(guidance).toMatch(
-        /never change or unset `RADIUS_RAD_BINARY` or `RADIUS_RAD_SKIP_VERSION_CHECK`/iu
-      );
-      expect(guidance).toMatch(/never search.*PATH.*\.rad\/bin.*fallback/isu);
-    }
-  });
-
-  it("packages the no-install Node runtime boundary", () => {
-    assertCurrentArtifact();
-    const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
-
-    expect(skillGuidance).toContain(
-      '"<loaded-node>" "<loaded-skill-base>/scripts/<script>.mjs"'
-    );
-    expect(skillGuidance).toMatch(
-      /never as a bare `node`, `npx`, or `npm` command/u
-    );
-    expect(skillGuidance).toMatch(
-      /Never download, install, unpack, build, or vendor a Node\.js runtime/u
-    );
-    expect(skillGuidance).toMatch(
-      /ask the user to install Node\.js 18 or newer/u
-    );
-    // Every script invocation goes through the resolved interpreter; a bare
-    // `node` is what sent an agent looking for a runtime to download.
-    expect(skillGuidance).not.toMatch(
-      /(?:^|[^-])\bnode "<loaded-skill-base>\/scripts\//u
+    expect(graphGuidance).toMatch(
+      /never search.*PATH.*\.rad\/bin.*fallback/isu
     );
   });
 
-  it("packages the Bicep checker exit-code contract", () => {
-    assertCurrentArtifact();
-    const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
-    const exitTwoRow = skillGuidance
-      .split(/\r?\n/u)
-      .find((line) => line.startsWith("| `2`"));
-
-    expect(skillGuidance).toContain(
-      "Only exit `1` permits a model edit in response to checker output."
-    );
-    expect(exitTwoRow).toContain(
-      "Stop the run and follow [When a step fails](#when-a-step-fails)."
-    );
-    expect(exitTwoRow).not.toContain("--abort");
-    const failureGuidance = skillGuidance.split("### When a step fails")[1];
-    expect(failureGuidance).toMatch(
-      /For a standalone run only, discard the run with:\n\n```text\n[^\n]*promote-app-model\.mjs" --abort --staging "<staging-dir>"/u
-    );
-    expect(failureGuidance).toMatch(
-      /radius_report_modeling_failure[^\n]*while the token is live, before any cancellation/u
-    );
-    expect(exitTwoRow).toContain(
-      "Report the exact checker failure and state that no application model was written."
-    );
-    expect(exitTwoRow).toContain(
-      "Do not edit the model based on this result, write `app.origin.json`, publish, or claim that the model compiled."
-    );
-    expect(skillGuidance).toContain(
-      "These codes apply only to `validate-bicep.mjs`."
-    );
-    expect(skillGuidance).toContain(
-      "counting reserved validation attempts in that run's `run.json`"
-    );
-    expect(skillGuidance).toContain(
-      "An unavailable check still consumes its reserved attempt."
-    );
-    expect(skillGuidance).toContain(
-      '"<loaded-node>" "<loaded-skill-base>/scripts/validate-bicep.mjs" <staging-dir>/app.bicep'
-    );
-    expect(skillGuidance).not.toContain(
-      '"<loaded-node>" "<loaded-skill-base>/scripts/validate-bicep.mjs" .radius/app.bicep'
-    );
-  });
-
-  it("packages the schema-sensitivity credential contract, not a property-name rule", () => {
-    assertCurrentArtifact();
-    const readGuidance = (relativePath: string): string =>
-      readFileSync(join(DIST_SKILL, relativePath), "utf8");
-    const secretsGuidance = readGuidance("references/secrets-handling.md");
-    const structureGuidance = readGuidance(
-      "references/bicep-structure-rules.md"
-    );
-    const skillGuidance = readGuidance("SKILL.md");
-
-    for (const guidance of [
-      secretsGuidance,
-      structureGuidance,
-      skillGuidance
-    ]) {
-      expect(guidance).toContain("`x-radius-sensitive: true`");
-      expect(guidance).toContain("`Radius.Data/mySqlDatabases.password`");
-      expect(guidance).toContain("`Radius.Messaging/rabbitMQ.password`");
-      // The regressed guidance keyed the decision on the property's name, so a
-      // reference property named `password` was assigned the raw secure param.
-      expect(guidance).not.toMatch(/`secretName`[,:]? (?:create|author)/u);
-    }
-    expect(secretsGuidance).toContain(
-      "Decide each credential input from the schema, never from the property's name"
-    );
-    expect(structureGuidance).toContain(
-      "classified by sensitivity rather than by property name"
-    );
-    expect(skillGuidance).toContain(
-      "classified by sensitivity and never by property name"
-    );
-    expect(skillGuidance).toContain(
-      "classified from the schema rather than from the property's name"
-    );
-    expect(secretsGuidance).toContain(
-      "A property named `password` may be either kind, and a reference property may be named `password`, `passwordSecret`, or `secretName`"
-    );
-    expect(secretsGuidance).toContain(
-      "Never assign a `@secure()` parameter to a reference property"
-    );
-    expect(structureGuidance).toContain(
-      "never a `@secure() param` (`Radius.Messaging/rabbitMQ.password`"
-    );
-    expect(skillGuidance).toContain(
-      "no `@secure() param` is assigned to a reference property"
-    );
-
-    const bicepBlocks = filesUnder(DIST_SKILL)
-      .filter((path) => path.endsWith(".md"))
-      .flatMap((path) => [
-        ...readFileSync(path, "utf8").matchAll(
-          /```bicep\r?\n([\s\S]*?)\r?\n```/gu
-        )
-      ])
-      .map((match) => match[1]);
-    const rabbitmqExample = bicepBlocks.find((block) =>
-      block.includes("'Radius.Messaging/rabbitMQ@")
-    );
-    expect(rabbitmqExample).toBeDefined();
-    expect(rabbitmqExample).toMatch(/password:\s*rabbitmqCredentials\.id\b/u);
-    expect(rabbitmqExample).toContain(
-      "resource rabbitmqCredentials 'Radius.Security/secrets"
-    );
-    expect(rabbitmqExample).not.toMatch(
-      /^\s*password:\s*rabbitmqPassword\s*$/mu
-    );
-    // `username` is the default the broker is provisioned with, not a value
-    // copied from the application's existing deployment.
-    expect(rabbitmqExample).toMatch(
-      /username:\s*'myadmin'\s*\/\/ default username/u
-    );
-    expect(rabbitmqExample).not.toMatch(/username:[^\n]*derived from source/u);
-    // Every consumer must authenticate as the broker's username, so the
-    // example binds consumers to the resource rather than to a second copy.
-    expect(rabbitmqExample).toMatch(
-      /ORDER_QUEUE_USERNAME:\s*\{\s*value:\s*rabbitmq\.properties\.username\b/u
-    );
-    expect(rabbitmqExample?.match(/'myadmin'/gu)).toHaveLength(1);
-    // A username set by Compose and read from an environment variable is the
-    // case that looked like a requirement; the rule table pins it to myadmin.
-    expect(secretsGuidance).toMatch(
-      /\|\s*`process\.env\.ORDER_QUEUE_USERNAME`, which Compose sets to `username`\s*\|\s*2\s*\|\s*`myadmin`; set `ORDER_QUEUE_USERNAME`\s*\|/u
-    );
-    // A cloud database admin login can't be renamed, so any run that writes
-    // over an existing model, refresh or regenerate, must keep its username.
-    expect(secretsGuidance).toContain(
-      "This applies to every run that writes over an existing `.radius/app.bicep`, whether the canvas asked for a refresh or the user asked to regenerate."
-    );
-    expect(skillGuidance).toContain(
-      "When an existing `.radius/app.bicep` already sets it on the same resource, keep that value, whether the run is a refresh or a regenerate."
-    );
-    expect(secretsGuidance).toContain(
-      "If the user asks to change it, keep the existing value, tell them the change may require replacing the service, and change it only after they confirm."
-    );
-    expect(secretsGuidance).not.toContain("unless the user asks to change it");
-    // A refresh skips choosing a new username but still traces consumers, so a
-    // fixed literal that differs from the kept value stops the run.
-    expect(secretsGuidance).toContain(
-      "Still trace every consumer: re-bind each one to the kept value"
-    );
-    expect(secretsGuidance).not.toContain("skip the rules below");
-    // Every one-source form the rule allows must pass the checklists, or a
-    // valid model would be rejected.
-    for (const guidance of [secretsGuidance, skillGuidance]) {
-      expect(guidance).toContain(
-        "`<resource>.properties.username`, the generated `CONNECTION_<CONNECTION>_USERNAME`, one shared `var`, or the schema's authored Secret through `secretKeyRef`"
+  // The handoff tells the agent to use skillBase as <skill-dir> and to run the
+  // scripts with nodeCommand instead of node. A script command in another form
+  // escapes that substitution and runs without the Node.js the canvas resolved.
+  it.each(STAGE_SKILLS)(
+    "packages %s script commands in the form the handoff runs with its resolved Node",
+    (skill) => {
+      assertCurrentArtifact();
+      const guidance = readFileSync(
+        join(DIST_SKILLS, skill, "SKILL.md"),
+        "utf8"
       );
+      const commands = [
+        ...guidance.matchAll(/`([^`\n]*scripts\/[^`\n]*\.mjs[^`\n]*)`/gu)
+      ].map(([, command]) => command);
+
+      expect(commands.length).toBeGreaterThan(0);
+      for (const command of commands) {
+        expect(command).toMatch(
+          /^node <skill-dir>\/scripts\/[\w-]+\.mjs(?: |$)/u
+        );
+      }
     }
-    // The SKILL.md refresh rule and checklist must allow the same confirmed
-    // change as the detailed rule.
-    expect(skillGuidance).toContain(
-      "Keep every provisioned service username the existing model sets, unless the user confirms a change after being told it may require replacing the service."
-    );
-    expect(skillGuidance).toContain(
-      "A model generated over an existing one keeps the username the existing model set, unless the user confirmed a change."
-    );
-    // Neither the generic Secret example nor runtime composition may read as
-    // permission for a second username copy.
-    expect(structureGuidance).toContain(
-      "This example puts a username in a Secret, which applies only when the consuming schema reads the username from that Secret."
-    );
-    expect(secretsGuidance).toContain(
-      "Bind a username the way [One username, one source](#one-username-one-source) requires, never as a separate literal."
-    );
-    expect(secretsGuidance).not.toContain(
-      "Bind nonsecret host, port, database, and username values from verified outputs or literals."
-    );
-    expect(secretsGuidance).toContain(
-      "if the profile sets none either, stop and report that the username source could not be found"
-    );
-    expect(secretsGuidance).toMatch(
-      /\|\s*`amqp\.connect\('amqp:\/\/guest:guest@' \+ host\)`\s*\|\s*3\s*\|\s*stop and report/u
-    );
-    // A fixed literal on one consumer decides the resource's username, and a
-    // conflicting request or second literal stops the run.
-    expect(secretsGuidance).toContain(
-      "Stop and report the conflict when two consumers fix different literals, or when the user asks for a username that differs from a fixed literal."
-    );
-    expect(secretsGuidance).toContain(
-      "If a consumer cannot read that Secret, for example because its username is a fixed literal, stop and report it."
-    );
-    // A shared username var must land in the same place with the same name
-    // on every regeneration.
-    expect(secretsGuidance).toContain(
-      "declare the value once as `var <resourceSymbolicName>Username`"
-    );
-    expect(skillGuidance).toContain(
-      "then `param` declarations, then `var` declarations, then the `Radius.Core/applications` resource"
-    );
-    const azureGuidance = readGuidance(
-      "references/azure-provider-value-rules.md"
-    );
-    expect(skillGuidance).toContain(
-      "(references/secrets-handling.md#provisioned-service-usernames)"
-    );
-    expect(azureGuidance).toContain(
-      "(secrets-handling.md#provisioned-service-usernames)"
-    );
-    expect(structureGuidance).toContain(
-      "(secrets-handling.md#one-username-one-source)"
-    );
-    expect(secretsGuidance).toContain(
-      "Writing `password: rabbitmqPassword` here deploys a broken application"
-    );
-    expect(secretsGuidance).toContain(
-      "a password is not a lowercase RFC 1123 subdomain"
-    );
+  );
 
-    // The MySQL example must keep the opposite, inline form so both
-    // conventions ship side by side.
-    const mysqlExample = bicepBlocks.find((block) =>
-      block.includes("resource mysql 'Radius.Data/mySqlDatabases@")
-    );
-    expect(mysqlExample).toBeDefined();
-    expect(mysqlExample).toMatch(/^\s*password:\s*password\s*$/mu);
-  });
-
-  it("packages the app-native configuration format contract", () => {
+  it("starts and aborts a staged run with the packaged Stage 1 script", () => {
     assertCurrentArtifact();
-    const readGuidance = (relativePath: string): string =>
-      readFileSync(join(DIST_SKILL, relativePath), "utf8");
-    const connectionGuidance = readGuidance(
-      "references/connection-conventions.md"
-    );
-    const secretsGuidance = readGuidance("references/secrets-handling.md");
-    const skillGuidance = readGuidance("SKILL.md");
-    const guidanceDocs = [connectionGuidance, secretsGuidance, skillGuidance];
-
-    for (const guidance of guidanceDocs) {
-      expect(guidance).toMatch(
-        /read the application code|trace every app-native|traced through checked-in source/iu
-      );
-      expect(guidance).toMatch(
-        /exact (?:format that parser expects|syntax that parser accepts)/iu
-      );
-      expect(guidance).toMatch(
-        /\bsafe(?:,\s+proven)?\s+runtime\s+(?:path|composition)\b/iu
-      );
-    }
-    expect(connectionGuidance).toContain(
-      "do not remap the Recipe `url` to a native setting merely because both are strings or use the same protocol"
-    );
-    expect(connectionGuidance).toContain(
-      "otherwise report the gap and stop before publishing the model"
-    );
-    expect(secretsGuidance).toContain(
-      "including separators, option names, encoding, TLS flags, and whether it expects one aggregate value or discrete fields"
-    );
-    expect(secretsGuidance).toContain(
-      "Bind a Recipe output directly only when it matches that exact format"
-    );
-    expect(skillGuidance).toContain(
-      "A package name alone, a string type, a credential-like variable name, a shared protocol, or a direct `secretKeyRef` is not proof"
-    );
-    expect(skillGuidance).toContain("`aggregate-secret-alias`");
-    expect(secretsGuidance).toContain(
-      "As a conservative executable backstop, `validate-bicep.mjs` rejects a Recipe-managed aggregate secret key"
-    );
-    for (const guidance of guidanceDocs) {
-      expect(guidance).not.toContain("StackExchange.Redis");
-    }
-    const checker = readFileSync(
-      join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
-      "utf8"
-    );
-    expect(checker).toContain("aggregate-secret-alias");
-  });
-
-  it("packages the exact-data-key contract for authored reference Secrets", () => {
-    assertCurrentArtifact();
-    const readGuidance = (relativePath: string): string =>
-      readFileSync(join(DIST_SKILL, relativePath), "utf8");
-    const secretsGuidance = readGuidance("references/secrets-handling.md");
-    const skillGuidance = readGuidance("SKILL.md");
-
-    expect(secretsGuidance).toContain(
-      "the authored Secret must expose the value under the exact data key the consuming schema names, matching case"
-    );
-    expect(secretsGuidance).toContain(
-      "Data keys are case-sensitive. Do not uppercase them by convention"
-    );
-    expect(secretsGuidance).toContain(
-      "do not assume the key matches the property name, the resource name, or the application's environment-variable name"
-    );
-    expect(secretsGuidance).toContain(
-      "Every `secretKeyRef.key` that reads the same authored Secret must use that same exact key"
-    );
-    expect(secretsGuidance).toContain(
-      "Read the required key from the consuming type's schema description"
-    );
-    expect(secretsGuidance).toContain(
-      "Authoring that data key as `PASSWORD` fails even though the Bicep compiles and the resource ID is correct"
-    );
-    expect(secretsGuidance).toContain("`CreateContainerConfigError`");
-    expect(skillGuidance).toContain(
-      "the exact case-sensitive data key the consuming schema names (`password`, not `PASSWORD`)"
-    );
-
-    const bicepBlocks = filesUnder(DIST_SKILL)
-      .filter((path) => path.endsWith(".md"))
-      .flatMap((path) => [
-        ...readFileSync(path, "utf8").matchAll(
-          /```bicep\r?\n([\s\S]*?)\r?\n```/gu
-        )
-      ])
-      .map((match) => match[1]);
-
-    // The authored Secret and every reader of it must agree on the exact
-    // lowercase key the rabbitMQ Recipe hardcodes.
-    const rabbitmqExample = bicepBlocks.find((block) =>
-      block.includes("'Radius.Messaging/rabbitMQ@")
-    );
-    expect(rabbitmqExample).toBeDefined();
-    expect(rabbitmqExample).toMatch(
-      /data:\s*\{\s*password:\s*\{\s*value:\s*rabbitmqPassword\s*\}/u
-    );
-    expect(rabbitmqExample).not.toMatch(/^\s*PASSWORD:/mu);
-
-    const rabbitmqConsumers = bicepBlocks.filter(
-      (block) =>
-        block.includes("secretName: rabbitmqCredentials.name") &&
-        block.includes("secretKeyRef")
-    );
-    // The broker example and the standalone consumer snippet both read this
-    // Secret, so every reader is checked rather than the first one found.
-    expect(rabbitmqConsumers.length).toBeGreaterThanOrEqual(2);
-    for (const consumer of rabbitmqConsumers) {
-      expect(consumer).toMatch(/key:\s*'password'/u);
-      expect(consumer).not.toMatch(/key:\s*'PASSWORD'/u);
-    }
-  });
-
-  it("packages the staged type-sensitivity contract both credential scripts share", () => {
-    assertCurrentArtifact();
-    const resolverScript = readFileSync(
-      join(DIST_SKILL, "scripts", "show-radius-type.mjs"),
-      "utf8"
-    );
-    const checkerScript = readFileSync(
-      join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
-      "utf8"
-    );
-    const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
-
-    // The two scripts never import each other, so the staged file name is the
-    // whole of their contract. A build that packaged one side's name and not
-    // the other's would ship a checker that silently never finds the evidence.
-    for (const script of [resolverScript, checkerScript]) {
-      expect(script).toContain('"resolved-types.json"');
-      expect(script).toContain("contractVersion");
-    }
-    expect(checkerScript).toContain("secure-parameter-target");
-    expect(skillGuidance).toContain("resolved-types.json");
-
-    // The checker verifies where a credential is assigned, not the authored
-    // Secret's data key. Layer 1's data-key rule has no mechanical guard, so
-    // the guidance must not let "the checker enforces this" read as covering
-    // it — that false confidence is the failure mode this stack exists to fix.
-    // The guidance now names two checks, so the caveat has to exclude both.
-    const secretsGuidance = readFileSync(
-      join(DIST_SKILL, "references", "secrets-handling.md"),
-      "utf8"
-    );
-    expect(secretsGuidance).toContain(
-      "the data-key contract below is not verified anywhere"
-    );
-  });
-
-  it("updates a legacy Radius pin with the packaged resolver without changing published files", () => {
-    assertCurrentArtifact();
-    const workspace = mkdtempSync(join(tmpdir(), "radius-legacy-pin-"));
-    try {
-      const radiusDir = join(workspace, ".radius");
-      const staging = join(radiusDir, ".staging-legacy");
-      mkdirSync(staging, { recursive: true });
-      writeFileSync(
-        join(staging, "run.json"),
-        JSON.stringify({ baseline: {} })
-      );
-      const current = join(radiusDir, "bicepconfig.json");
-      const origin = join(radiusDir, "app.origin.json");
-      const config = JSON.stringify({
-        extensions: {
-          radius: "br:biceptypes.azurecr.io/radius:0.61",
-          customTypes: "./custom-types.tgz"
-        }
-      });
-      const originText = JSON.stringify({ skillVersion: "0.1.1" });
-      writeFileSync(current, config);
-      writeFileSync(origin, originText);
-
-      const result = spawnSync(
+    const workspace = mkdtempSync(join(tmpdir(), "radius-packaged-model-"));
+    const runModel = (...args: string[]) =>
+      spawnSync(
         process.execPath,
         [
-          "--input-type=module",
-          "--eval",
-          `import { pathToFileURL } from "node:url";
-const resolver = await import(pathToFileURL(process.argv[2]).href);
-await resolver.writeStagedBicepConfig(
-  process.argv[3], "br:biceptypes.azurecr.io/radius:0.62"
-);`,
-          "packaged-resolver-test",
-          join(DIST_SKILL, "scripts", "show-radius-type.mjs"),
-          staging
+          join(DIST_SKILLS, "radius-app-model", "scripts", "model.mjs"),
+          ...args
         ],
         { cwd: workspace, encoding: "utf8", timeout: 10_000 }
       );
-
-      expect(result.status, result.stderr).toBe(0);
-      expect(
-        JSON.parse(readFileSync(join(staging, "bicepconfig.json"), "utf8"))
-      ).toEqual({
-        experimentalFeaturesEnabled: { extensibility: true },
-        extensions: {
-          radius: "br:biceptypes.azurecr.io/radius:0.62",
-          customTypes: "./custom-types.tgz"
-        }
-      });
-      expect(readFileSync(current, "utf8")).toBe(config);
-      expect(readFileSync(origin, "utf8")).toBe(originText);
-    } finally {
-      rmSync(workspace, { recursive: true, force: true });
-    }
-  });
-
-  it("packages the checker's secure-value remedies", () => {
-    assertCurrentArtifact();
-    const checkerScript = readFileSync(
-      join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
-      "utf8"
-    );
-
-    // Bicep names the rejected property but never the remedy, and Radius emits
-    // these findings with no severity, so they print as a warning while failing
-    // the build. The remedy has to ship with the checker or the model spends a
-    // repair attempt rediscovering it. The rule IDs are the contract here: what
-    // each remedy says is asserted behaviorally in app-bicep-check.test.ts,
-    // where rewording cannot silently pass.
-    for (const rule of [
-      "use-secure-value-for-secure-inputs",
-      "secure-secrets-in-params",
-      "secure-parameter-default"
-    ]) {
-      expect(checkerScript).toContain(rule);
-    }
-  });
-
-  // The checker loads its security-rule inspection from a sibling script, so
-  // the packaged copy only works if that module ships beside it. With the
-  // module present, the checker asks the managed Bicep for the compile's files,
-  // finds none installed in the empty home, and reports that it could not
-  // establish whether the security rules run; a missing module would report
-  // the failed import instead.
-  it("packages a checker that loads its security-rule inspection", () => {
-    assertCurrentArtifact();
-    const workspace = mkdtempSync(join(tmpdir(), "radius-security-rules-"));
     try {
-      writeFileSync(join(workspace, "app.bicep"), "");
+      execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+      const radiusDir = join(workspace, ".radius");
 
-      const result = spawnSync(
-        process.execPath,
-        [
-          join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
-          join(workspace, "app.bicep")
-        ],
-        {
-          encoding: "utf8",
-          env: { ...process.env, HOME: workspace, USERPROFILE: workspace }
-        }
+      const begun = runModel("begin");
+      expect(begun.status, begun.stderr).toBe(0);
+      const runs = readdirSync(radiusDir).filter((name) =>
+        name.startsWith(".staging-")
       );
+      expect(runs).toHaveLength(1);
 
-      expect(result.stderr).toContain(
-        "error checker-unavailable: whether the Bicep security rules run could not be established"
-      );
-      expect(result.status).toBe(2);
+      const aborted = runModel("abort", join(radiusDir, runs[0]));
+      expect(aborted.status, aborted.stderr).toBe(0);
+      expect(readdirSync(radiusDir)).toEqual([]);
     } finally {
       rmSync(workspace, { recursive: true, force: true });
     }
-  });
-
-  it("packages the connection-source validator", () => {
-    assertCurrentArtifact();
-    const checkerScript = readFileSync(
-      join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
-      "utf8"
-    );
-
-    expect(checkerScript).toContain("connection-source");
   });
 
   it("packages each page module exactly once", () => {
@@ -1931,16 +1105,12 @@ await resolver.writeStagedBicepConfig(
       expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toContain("[canvas] installed");
       expect(existsSync(installPath)).toBe(true);
-      expectMatchingFile(
-        SOURCE_CODE_REFERENCE,
-        join(
-          installDir,
-          "skills",
-          "radius-app-bicep",
-          "references",
-          "source-code-references.md"
-        )
-      );
+      for (const skill of STAGE_SKILLS) {
+        expectMatchingFile(
+          join(SOURCE_SKILLS, skill, "SKILL.md"),
+          join(installDir, "skills", skill, "SKILL.md")
+        );
+      }
       expect(existsSync(join(workspaceRoot, ".artifacts", "radius"))).toBe(
         true
       );
@@ -1949,59 +1119,40 @@ await resolver.writeStagedBicepConfig(
     }
   });
 
-  it.each([
-    {
-      asset: "radius-app-bicep skill",
-      missingAsset: ["radius-app-bicep"],
-      expectedError: "Could not resolve",
-      expectedPath: "app-model-staging.mjs"
-    },
-    {
-      asset: "source-reference guide",
-      missingAsset: [
-        "radius-app-bicep",
-        "references",
-        "source-code-references.md"
-      ],
-      expectedError:
-        "[canvas] install copy failed: Missing required local-install asset:",
-      expectedPath: "source-code-references.md"
-    }
-  ])(
-    "fails before installing when the $asset is absent",
-    ({ missingAsset, expectedError, expectedPath }) => {
-      const workspaceRoot = mkdtempSync(
-        join(tmpdir(), "radius-canvas-missing-install-asset-")
-      );
-      const installDir = join(workspaceRoot, "installed");
-      const installPath = join(installDir, "extension.mjs");
-      try {
-        const buildDirectory = prepareBuildWorkspace(
-          workspaceRoot,
-          missingAsset
-        );
-        const result = spawnSync(process.execPath, ["build.mjs", "--install"], {
-          cwd: buildDirectory,
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            RADIUS_SOURCE_REF: SOURCE_REF,
-            RADIUS_CANVAS_INSTALL_PATH: installPath
-          }
-        });
+  it("fails before installing when a stage skill's SKILL.md is absent", () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "radius-canvas-missing-install-asset-")
+    );
+    const installDir = join(workspaceRoot, "installed");
+    const installPath = join(installDir, "extension.mjs");
+    try {
+      const buildDirectory = prepareBuildWorkspace(workspaceRoot, [
+        "radius-app-model",
+        "SKILL.md"
+      ]);
+      const result = spawnSync(process.execPath, ["build.mjs", "--install"], {
+        cwd: buildDirectory,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          RADIUS_SOURCE_REF: SOURCE_REF,
+          RADIUS_CANVAS_INSTALL_PATH: installPath
+        }
+      });
 
-        expect(result.error).toBeUndefined();
-        expect(result.signal).toBeNull();
-        expect(result.status).not.toBe(0);
-        expect(result.stderr).toContain(expectedError);
-        expect(result.stderr).toContain(expectedPath);
-        expect(result.stdout).not.toContain("[canvas] installed");
-        expect(existsSync(installDir)).toBe(false);
-      } finally {
-        rmSync(workspaceRoot, { recursive: true, force: true });
-      }
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(
+        "[canvas] install copy failed: Missing required local-install asset:"
+      );
+      expect(result.stderr).toContain(join("radius-app-model", "SKILL.md"));
+      expect(result.stdout).not.toContain("[canvas] installed");
+      expect(existsSync(installDir)).toBe(false);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
     }
-  );
+  });
 
   it.each([
     ["Git is unavailable", true],

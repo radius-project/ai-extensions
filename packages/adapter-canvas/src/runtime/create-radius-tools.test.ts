@@ -51,42 +51,11 @@ function setup(options?: Parameters<typeof createFakeDependencies>[0]) {
   return { ...fake, tools, modelingActivity, missingModelHandoffs, authoring };
 }
 
-describe("managed authoring tool input boundaries", () => {
-  it.each(["stagingDir", "manifestPath", "targetPath"])(
-    "refuses caller-selected compilation through %s",
-    async (field) => {
-      const { deps, tools, authoring } = setup();
-      const publish = vi.spyOn(authoring, "publish");
-      const result = await findTool(
-        tools,
-        "radius_publish_custom_type_extension"
-      ).handler({ requestToken: "live", [field]: "caller-chosen" });
-      expect(result).toContain("the staging paths are fixed");
-      expect(publish).not.toHaveBeenCalled();
-      expect(deps.rad.runRadBicepPublishExtension).not.toHaveBeenCalled();
-    }
-  );
-
-  it.each([undefined, "nested/postgres-recipe.bicep", "app.bicep", 123])(
-    "refuses managed recipe filename %j before publication or credential setup",
-    async (file) => {
-      const { deps, tools, authoring } = setup();
-      const publish = vi.spyOn(authoring, "publish");
-      const result = await findTool(tools, "radius_publish_recipe").handler({
-        requestToken: "live",
-        file
-      });
-      expect(result).toContain("requires a staged recipe filename");
-      expect(publish).not.toHaveBeenCalled();
-      expect(deps.withGhcrDockerConfig).not.toHaveBeenCalled();
-      expect(deps.rad.runRadBicepPublish).not.toHaveBeenCalled();
-    }
-  );
-
+describe("radius_complete_app_authoring input", () => {
   it.each([
     [undefined, "complete", "token is required"],
-    [" ", "complete", "valid Radius authoring request token"],
-    [22, "cancel", "valid Radius authoring request token"],
+    [" ", "complete", "token is required"],
+    [22, "cancel", "token is required"],
     ["live", "replace", "Choose complete or cancel."]
   ])(
     "refuses completion token %j and outcome %j",
@@ -126,10 +95,9 @@ function expectSkillHandoff(
 ): void {
   const handoff = parseSkillHandoff(value);
   expect(handoff).toMatchObject({
-    skill: "radius-app-bicep",
+    skill: "radius-app-model",
     repoPath,
-    skillBase: "/test/skills/radius-app-bicep",
-    skillVersion: "0.1.0-test",
+    skillBase: "/test/skills/radius-app-model",
     instruction: `SKILL.md content for ${repoPath}`
   });
   if (brief === undefined) expect(handoff).not.toHaveProperty("brief");
@@ -148,7 +116,8 @@ describe("RU-07: radius_generate_app", () => {
     const result = await findTool(tools, "radius_generate_app").handler({
       repoPath: "/some/repo"
     });
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+    expect(deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
       "/some/repo",
       undefined
     );
@@ -158,7 +127,11 @@ describe("RU-07: radius_generate_app", () => {
   it("falls back to a standalone invocation when repoPath is omitted", async () => {
     const { tools, deps } = setup();
     const result = await findTool(tools, "radius_generate_app").handler({});
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(undefined, undefined);
+    expect(deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
+      undefined,
+      undefined
+    );
     expectSkillHandoff(result, ".");
   });
 
@@ -175,7 +148,7 @@ describe("RU-07: radius_generate_app", () => {
 
     expect(result).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
     expect(result).toContain("acme/widgets");
-    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+    expect(deps.radiusSkillHandoff).not.toHaveBeenCalled();
   });
 
   it("hands over the skill when the repository has a Dockerfile", async () => {
@@ -190,7 +163,8 @@ describe("RU-07: radius_generate_app", () => {
     });
 
     expectSkillHandoff(result, "/workspace");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+    expect(deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
       "/workspace",
       undefined
     );
@@ -285,7 +259,8 @@ describe("RU-07: radius_generate_app", () => {
     });
 
     expectSkillHandoff(result, "/workspace");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+    expect(deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
       "/workspace",
       undefined
     );
@@ -302,7 +277,8 @@ describe("RU-07: radius_generate_app", () => {
     });
 
     expectSkillHandoff(result, "/workspace");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+    expect(deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
       "/workspace",
       undefined
     );
@@ -321,7 +297,8 @@ describe("RU-07: radius_generate_app", () => {
     });
 
     expectSkillHandoff(result, "/workspace");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+    expect(deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
       "/workspace",
       undefined
     );
@@ -340,7 +317,8 @@ describe("RU-07: radius_generate_app", () => {
     });
 
     expectSkillHandoff(result, "/workspace");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+    expect(deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
       "/workspace",
       undefined
     );
@@ -365,7 +343,11 @@ describe("RU-07: radius_generate_app", () => {
     });
 
     expectSkillHandoff(result, repoPath);
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(repoPath, undefined);
+    expect(deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
+      repoPath,
+      undefined
+    );
   });
 
   // The listing the check can obtain describes the workspace, so it is not
@@ -382,7 +364,8 @@ describe("RU-07: radius_generate_app", () => {
     });
 
     expectSkillHandoff(result, "/elsewhere/other-repo");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+    expect(deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
       "/elsewhere/other-repo",
       undefined
     );
@@ -407,7 +390,7 @@ describe("RU-07: radius_generate_app", () => {
     });
 
     expect(result).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
-    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+    expect(deps.radiusSkillHandoff).not.toHaveBeenCalled();
   });
 
   it("does not gate when the workspace path itself is unknown", async () => {
@@ -427,7 +410,8 @@ describe("RU-07: radius_generate_app", () => {
     });
 
     expectSkillHandoff(result, "/workspace");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+    expect(deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
       "/workspace",
       undefined
     );
@@ -457,7 +441,8 @@ describe("RU-07b: radius_generate_app with several Dockerfiles", () => {
   // several Dockerfiles must never withhold the skill or trigger the question.
   it("still hands over the full skill so the services are modeled as one application", async () => {
     const { result, deps } = await generateFor(MICROSERVICES);
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+    expect(deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
       "/workspace",
       expect.any(String)
     );
@@ -497,7 +482,8 @@ describe("RU-07b: radius_generate_app with several Dockerfiles", () => {
   // block entirely and the question cannot be re-asked after being answered.
   it("says nothing more once the user has answered with a directory", async () => {
     const { result, deps } = await generateFor(MICROSERVICES, "services/api");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+    expect(deps.radiusSkillHandoff).toHaveBeenCalledWith(
+      "radius-app-model",
       "services/api",
       undefined
     );
@@ -530,7 +516,7 @@ describe("RU-07b: radius_generate_app with several Dockerfiles", () => {
       "/workspace/services/api"
     );
     expect(result).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
-    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+    expect(deps.radiusSkillHandoff).not.toHaveBeenCalled();
   });
 
   it("still briefs for a location outside the worktree", async () => {
@@ -1175,108 +1161,6 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
 });
 
 // RU-09: publish custom extension confinement/defaults/invoke/errors.
-describe("RU-09: radius_publish_custom_type_extension", () => {
-  it("reports a missing manifest without invoking rad", async () => {
-    const { tools, deps } = setup();
-    (deps.process.existsSync as ReturnType<typeof vi.fn>).mockReturnValue(
-      false
-    );
-    const result = await findTool(
-      tools,
-      "radius_publish_custom_type_extension"
-    ).handler({});
-    expect(result).toContain("Resource-type manifest not found at");
-    expect(deps.rad.runRadBicepPublishExtension).not.toHaveBeenCalled();
-  });
-
-  it("defaults manifestPath/targetPath and publishes via the injected rad dependency", async () => {
-    const { tools, deps } = setup();
-    const result = await findTool(
-      tools,
-      "radius_publish_custom_type_extension"
-    ).handler({});
-    expect(
-      deps.publishTargets.resolveExistingRadiusArtifact
-    ).toHaveBeenCalledWith(
-      "/workspace",
-      undefined,
-      ".radius/custom-types.yaml"
-    );
-    expect(
-      deps.publishTargets.resolveRadiusArtifactTarget
-    ).toHaveBeenCalledWith("/workspace", undefined, ".radius/custom-types.tgz");
-    expect(deps.rad.runRadBicepPublishExtension).toHaveBeenCalledOnce();
-    expect(result).toContain("Published custom-type extension to");
-  });
-
-  it("confines paths under the workspace .radius directory (propagates a confinement error)", async () => {
-    const { tools, deps } = setup();
-    (
-      deps.publishTargets.resolveExistingRadiusArtifact as ReturnType<
-        typeof vi.fn
-      >
-    ).mockImplementation(() => {
-      throw new Error(
-        "Path escapes the workspace .radius directory: ../../etc/passwd"
-      );
-    });
-    const result = await findTool(
-      tools,
-      "radius_publish_custom_type_extension"
-    ).handler({ manifestPath: "../../etc/passwd" });
-    expect(result).toContain("Could not publish the custom-type extension");
-    expect(result).toContain("escapes the workspace");
-  });
-
-  // A modeling run writes into `.radius/.staging-<runId>/` and publishes only
-  // once it is complete, so the package this tool produces has to land in the
-  // run's directory rather than where the product reads it.
-  it("defaults into the run's staging directory when one is given", async () => {
-    const { tools, deps } = setup();
-    await findTool(tools, "radius_publish_custom_type_extension").handler({
-      stagingDir: ".staging-run-42"
-    });
-    expect(
-      deps.publishTargets.resolveExistingRadiusArtifact
-    ).toHaveBeenCalledWith(
-      "/workspace",
-      undefined,
-      ".radius/.staging-run-42/custom-types.yaml"
-    );
-    expect(
-      deps.publishTargets.resolveRadiusArtifactTarget
-    ).toHaveBeenCalledWith(
-      "/workspace",
-      undefined,
-      ".radius/.staging-run-42/custom-types.tgz"
-    );
-  });
-
-  it("rejects a staging directory that is not a staging directory", async () => {
-    const { tools, deps } = setup();
-    const result = await findTool(
-      tools,
-      "radius_publish_custom_type_extension"
-    ).handler({ stagingDir: "../../etc" });
-    expect(result).toContain("Could not publish the custom-type extension");
-    expect(deps.rad.runRadBicepPublishExtension).not.toHaveBeenCalled();
-  });
-
-  it("surfaces a publish failure as a friendly warning", async () => {
-    const { tools, deps } = setup();
-    (
-      deps.rad.runRadBicepPublishExtension as ReturnType<typeof vi.fn>
-    ).mockRejectedValue(new Error("rad bicep publish-extension failed"));
-    const result = await findTool(
-      tools,
-      "radius_publish_custom_type_extension"
-    ).handler({});
-    expect(result).toContain("Could not publish the custom-type extension");
-    expect(result).toContain("rad bicep publish-extension failed");
-  });
-});
-
-// RU-10: publish recipe confinement/GHCR/errors.
 describe("RU-10: radius_publish_recipe", () => {
   it("rejects a target that does not publish under the workspace repo", async () => {
     const { tools, deps } = setup();
@@ -1286,7 +1170,7 @@ describe("RU-10: radius_publish_recipe", () => {
       "The recipe target must publish under the repository being modeled."
     );
     const result = await findTool(tools, "radius_publish_recipe").handler({
-      file: ".radius/recipe.bicep",
+      file: ".radius/cache-recipe.bicep",
       target: "br:ghcr.io/other/repo/recipe:v1"
     });
     expect(result).toContain("must publish under the repository");
@@ -1299,23 +1183,23 @@ describe("RU-10: radius_publish_recipe", () => {
       false
     );
     const result = await findTool(tools, "radius_publish_recipe").handler({
-      file: ".radius/recipe.bicep",
+      file: ".radius/cache-recipe.bicep",
       target: "br:ghcr.io/acme/widgets/recipe:v1"
     });
     expect(result).toContain("Recipe file not found at");
     expect(deps.withGhcrDockerConfig).not.toHaveBeenCalled();
   });
 
-  it("publishes through withGhcrDockerConfig and reports the published target", async () => {
+  it("publishes the Recipe file that the plan published, through withGhcrDockerConfig", async () => {
     const { tools, deps } = setup();
     const result = await findTool(tools, "radius_publish_recipe").handler({
-      file: ".radius/recipe.bicep",
+      file: ".radius/cache-recipe.bicep",
       target: "br:ghcr.io/acme/widgets/recipe:v1"
     });
     expect(deps.withGhcrDockerConfig).toHaveBeenCalledOnce();
     expect(deps.rad.runRadBicepPublish).toHaveBeenCalledWith(
       expect.objectContaining({
-        file: expect.any(String),
+        file: expect.stringMatching(/[\\/]\.radius[\\/]cache-recipe\.bicep$/u),
         target: "br:ghcr.io/acme/widgets/recipe:v1",
         env: { DOCKER_CONFIG: "/tmp/fake-docker-config" }
       })
@@ -1329,7 +1213,7 @@ describe("RU-10: radius_publish_recipe", () => {
       new Error("denied: permission_denied")
     );
     const result = await findTool(tools, "radius_publish_recipe").handler({
-      file: ".radius/recipe.bicep",
+      file: ".radius/cache-recipe.bicep",
       target: "br:ghcr.io/acme/widgets/recipe:v1"
     });
     expect(result).toContain("Could not publish the recipe");

@@ -26,8 +26,7 @@ import {
   deployStatusKeys,
   mergeDeployedGraphDisplayMetadata,
   mergeDeployedGraphMetadata,
-  projectDeployedGraph,
-  serializeAppOrigin
+  projectDeployedGraph
 } from "@radius-project/core";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
@@ -237,12 +236,12 @@ describe("graph concurrency through production HTTP routes", () => {
             bicepByRepoBranch: { "workspace:octo/app@main": model },
             filesByRepoBranch: {
               [`workspace:octo/app@main:${APP_ORIGIN_REPO_PATH}`]:
-                serializeAppOrigin({
+                JSON.stringify({
                   generatedAt: "2026-08-11T05:32:32.000Z",
                   sourceCommit: "a".repeat(40),
-                  skillVersion: "0.1.0-test",
                   radiusVersion: "0.60",
-                  appBicepHash: hashAppBicep(model)
+                  appBicepHash: hashAppBicep(model),
+                  stage: "model"
                 })
             },
             headCommits: { [`workspace:${workspace}`]: "b".repeat(40) },
@@ -251,7 +250,7 @@ describe("graph concurrency through production HTTP routes", () => {
           (deps) => {
             deps.appModel.workspaceSourceRevision = async () =>
               "workspace:saved";
-            deps.radiusAppBicepSkill = () =>
+            deps.radiusSkillHandoff = () =>
               JSON.stringify({
                 nodeCommand: path.resolve("fixture-node"),
                 skillBase: path.resolve("fixture-skill")
@@ -260,7 +259,7 @@ describe("graph concurrency through production HTTP routes", () => {
             deps.beginManagedModel = (worktree) => ({
               ...beginManaged(worktree),
               stagingDir: stage,
-              validate: (check) => check(path.join(stage, "app.bicep")),
+              validate: (check) => check(stage),
               promote
             });
           }

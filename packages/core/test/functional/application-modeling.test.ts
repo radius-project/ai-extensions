@@ -24,7 +24,6 @@ import {
   normalizeAppBicep,
   projectDeployedGraph,
   resolveRecipeOutputs,
-  serializeAppOrigin,
   unsupportedAppSourceReport,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "../../src/index.js";
@@ -76,12 +75,13 @@ function githubForHead(options: { modelAtRoot?: boolean } = {}) {
     files: {
       [contentsPath(REPO, modelPath, HEAD_BRANCH)]: APP_BICEP_WITH_CACHE,
       [contentsPath(REPO, ".radius/app.origin.json", HEAD_BRANCH)]:
-        serializeAppOrigin({
+        JSON.stringify({
           generatedAt: "2026-01-01T00:00:00.000Z",
           sourceCommit: SOURCE_COMMIT,
-          skillVersion: "1.4.0",
           radiusVersion: "0.60",
-          appBicepHash: hashAppBicep(APP_BICEP_WITH_CACHE)
+          appBicepHash: hashAppBicep(APP_BICEP_WITH_CACHE),
+          stage: "complete",
+          provider: "azure"
         }),
       [recipePackContentPath("azure")]: AZURE_RECIPE_PACK,
       [recipePackContentPath("kubernetes")]: KUBERNETES_RECIPE_PACK
@@ -110,7 +110,6 @@ describe("application modeling journey", () => {
       ),
       headCommit: HEAD_COMMIT,
       sourceChanged: false,
-      generatorVersion: "1.4.0",
       hashAppBicep
     });
     expect(freshness.status).toBe("up-to-date");
@@ -234,7 +233,6 @@ describe("application modeling journey", () => {
       originText,
       headCommit: HEAD_COMMIT,
       sourceChanged: true,
-      generatorVersion: "1.4.0",
       hashAppBicep
     });
 
@@ -254,7 +252,6 @@ describe("application modeling journey", () => {
       originText,
       headCommit: HEAD_COMMIT,
       sourceChanged: true,
-      generatorVersion: "1.4.0",
       hashAppBicep
     });
 

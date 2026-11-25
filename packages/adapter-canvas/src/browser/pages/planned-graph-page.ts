@@ -301,7 +301,7 @@ export function initializePlannedGraphPage(
           nextRequestRefresh = refresh;
           status(
             context,
-            "Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the planned graph will appear once it is saved.",
+            "Copilot is generating .radius/app.bicep with the radius-app-model skill… the planned graph will appear once it is saved.",
             "info"
           );
           // Nothing announces the model's arrival, so the planned graph only

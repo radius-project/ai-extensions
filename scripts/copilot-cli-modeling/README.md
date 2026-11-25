@@ -1,6 +1,6 @@
 # Copilot CLI modeling run
 
-This harness runs Copilot CLI with the Radius plugin built from this checkout. For one case from [`cases`](cases), it sends the dataset prompt, `Model my app as a Radius application`. The run passes when the agent loads the plugin's `radius-app-bicep` skill and the skill publishes `.radius/app.bicep` in the case's app. It does not grade the model.
+This harness runs Copilot CLI with the Radius plugin built from this checkout. For one case from [`cases`](cases), it sends the dataset prompt, `Model my app as a Radius application`. The run passes when the agent loads the plugin's `radius-app-model` skill and the skill publishes `.radius/app.bicep` in the case's app. It does not grade the model.
 
 The [Copilot CLI Modeling](../../.github/workflows/copilot-cli-modeling.yml) workflow runs every case on `ubuntu-24.04`, each in its own job. It runs daily at 05:53 UTC, and you can start it by hand from the Actions tab. A scheduled failure opens or updates the issue "Copilot CLI Modeling scheduled failure" with the `test-failure` label, and the next passing scheduled run closes it.
 
@@ -13,9 +13,9 @@ The [Copilot CLI Modeling](../../.github/workflows/copilot-cli-modeling.yml) wor
 5. It waits up to 30 minutes for the CLI to exit. Then it copies the evidence to the output directory.
 6. It reads the session events. The run passes only if all of these are true:
    - The CLI exited with code 0 in 30 minutes, and the session did not fail.
-   - The agent loaded the `radius-app-bicep` skill from the `radius` plugin. A project skill with the same name does not count.
+   - The agent loaded the `radius-app-model` skill from the `radius` plugin. A project skill with the same name does not count.
    - `.radius/app.bicep` exists and is not empty.
-   - `.radius/app.origin.json` records the hash of that `app.bicep`. The skill writes this record when it publishes a model, so an `app.bicep` that the agent writes outside the skill fails.
+   - `.radius/app.origin.json` records the hash of that `app.bicep`. The skill's check writes this record when the model passes, so an `app.bicep` that the agent writes outside the skill fails.
    - The session events, `app.bicep`, and `app.origin.json` are regular files. The run does not read a symbolic link or a file under one.
 
 The summary shows the model calls, tokens, and durations, but they do not change the result.

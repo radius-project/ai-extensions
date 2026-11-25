@@ -5,7 +5,11 @@ import {
 } from "@radius-project/adapter-shared";
 import { createTestDeploymentRuntime } from "../../../test/support/server/deployment-runtime.js";
 import { createDeferred } from "../../../test/support/browser/fakes.js";
-import { createDeployRequestService } from "./deploy-request.js";
+import {
+  createDeployRequestService,
+  type DeployRequestDependencies
+} from "./deploy-request.js";
+import { hashAppBicep } from "../../app-bicep-hash.js";
 import type { PlannedGraphRecoveryService } from "./deploy-planned-graph.js";
 import { createDeploymentViews } from "./deployment-views.js";
 import type { CanvasState } from "../../shared.js";
@@ -45,20 +49,24 @@ function harness(state: CanvasState = {}) {
     plannedGraph: {
       recover: vi.fn<PlannedGraphRecoveryService["recover"]>(async () => null)
     },
-    readModelForSelection: vi.fn<() => Promise<DeployModelSource>>(
-      async () => ({
-        status: "available",
-        content: "model",
-        fromWorkspace: true
-      })
-    ),
+    readModelForSelection: vi.fn<
+      DeployRequestDependencies["readModelForSelection"]
+    >(async () => ({
+      status: "available",
+      content: "model",
+      fromWorkspace: true
+    })),
     runtime: { ...runtime, start },
     readInstanceEntry: () => entry,
     readDeploymentDefaults: views.defaults,
     attach,
     reportError: vi.fn(),
     errorMessage: (error: unknown) =>
-      error instanceof Error ? error.message : String(error)
+      error instanceof Error ? error.message : String(error),
+    skillHandoff: vi.fn<DeployRequestDependencies["skillHandoff"]>(
+      (skill) => `{"skill":"${skill}"}`
+    ),
+    sendHandoff: vi.fn<DeployRequestDependencies["sendHandoff"]>(async () => {})
   };
   return {
     runtime,
@@ -161,7 +169,9 @@ describe("deployment HTTP request adapter", () => {
     "attach",
     "errorMessage",
     "reportError",
-    "readModelForSelection"
+    "readModelForSelection",
+    "skillHandoff",
+    "sendHandoff"
   ] as const)("requires the %s binding", (key) => {
     const h = harness();
     Object.defineProperty(h.dependencies, key, { value: undefined });
@@ -493,5 +503,185 @@ describe("deployment HTTP request adapter", () => {
     expect(h.dependencies.reportError).toHaveBeenCalledWith(failure);
     expect(h.runtime.owner.hasActiveWork()).toBe(true);
     h.finished.resolve();
+  });
+
+  describe("before deploying a model that a stage skill recorded", () => {
+    const MODEL =
+      "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
+
+    function recorded(
+      h: ReturnType<typeof harness>,
+      origin: Record<string, unknown> | null,
+      model = MODEL
+    ): void {
+      h.dependencies.readModelForSelection.mockImplementation(
+        async (_entry, _repo, _branch, path) =>
+          path === ".radius/app.origin.json" ?
+            origin ?
+              {
+                status: "available",
+                content: JSON.stringify(origin),
+                fromWorkspace: true
+              }
+            : { status: "missing" }
+          : { status: "available", content: model, fromWorkspace: true }
+      );
+    }
+
+    function record(fields: Record<string, unknown>) {
+      return {
+        generatedAt: "2026-11-01T00:00:00Z",
+        sourceCommit: "a".repeat(40),
+        radiusVersion: "0.60",
+        appBicepHash: hashAppBicep(MODEL),
+        ...fields
+      };
+    }
+
+    it.each([
+      [
+        "a Stage 1 model",
+        { stage: "model" },
+        ["radius-app-plan", "radius-app-complete"]
+      ],
+      [
+        "a planned model",
+        { stage: "plan", provider: "azure" },
+        ["radius-app-complete"]
+      ]
+    ])(
+      "refuses %s and asks Copilot once to finish it",
+      async (_label, fields, skills) => {
+        const work =
+          skills.length === 2 ?
+            "planning it for azure with the radius-app-plan skill and completing it with the radius-app-complete skill"
+          : "completing it with the radius-app-complete skill";
+        const h = harness();
+        recorded(h, record(fields));
+
+        const response = await h.service.deploy({
+          instanceId: "panel",
+          body: body({ provider: "azure" })
+        });
+
+        expect(response).toEqual({
+          status: 409,
+          body: {
+            error: `The application model is not ready to deploy, so nothing was deployed. Copilot is ${work}. Select Deploy again when it finishes.`
+          }
+        });
+        expect(h.runtime.owner.lookup()).toEqual({ kind: "missing" });
+        expect(h.dependencies.sendHandoff).toHaveBeenCalledOnce();
+        const [message] = h.dependencies.sendHandoff.mock.calls[0] ?? [];
+        for (const skill of skills)
+          expect(message?.prompt).toContain(`{"skill":"${skill}"}`);
+        expect(message?.prompt).toContain("push them to `feature`");
+        expect(
+          h.dependencies.skillHandoff.mock.calls.map(([skill]) => skill)
+        ).toEqual(skills);
+      }
+    );
+
+    it.each([
+      [
+        "a completed model",
+        record({ stage: "complete", provider: "azure" }),
+        MODEL
+      ],
+      ["a model with no record", null, MODEL],
+      [
+        "a model edited after its record",
+        record({ stage: "model" }),
+        `${MODEL}\n// edit`
+      ]
+    ])("deploys %s as before", async (_label, origin, model) => {
+      const h = harness();
+      recorded(h, origin, model);
+
+      const response = await h.service.deploy({
+        instanceId: "panel",
+        body: body({ provider: "azure" })
+      });
+
+      expect(response.status).toBe(200);
+      expect(h.dependencies.sendHandoff).not.toHaveBeenCalled();
+      h.finished.resolve();
+    });
+
+    it("deploys an explicit model that it cannot read as before", async () => {
+      const h = harness();
+      h.dependencies.readModelForSelection.mockImplementation(
+        async (_entry, _repo, _branch, path) =>
+          path === ".radius/app.origin.json" ?
+            {
+              status: "available",
+              content: JSON.stringify(record({ stage: "model" })),
+              fromWorkspace: true
+            }
+          : { status: "unavailable", error: "GitHub unavailable" }
+      );
+
+      const response = await h.service.deploy({
+        instanceId: "panel",
+        body: body({ provider: "azure", appFile: ".radius/app.bicep" })
+      });
+
+      expect(response.status).toBe(200);
+      expect(h.state.deployAttempt?.appFile).toBe(".radius/app.bicep");
+      expect(h.dependencies.sendHandoff).not.toHaveBeenCalled();
+      h.finished.resolve();
+    });
+
+    it("reports a handoff that could not reach Copilot without deploying", async () => {
+      const h = harness();
+      recorded(h, record({ stage: "model" }));
+      h.dependencies.sendHandoff.mockRejectedValue(
+        new Error("Could not reach the Copilot session to run this command.")
+      );
+
+      const response = await h.service.deploy({
+        instanceId: "panel",
+        body: body({ provider: "azure" })
+      });
+
+      expect(response).toEqual({
+        status: 503,
+        body: {
+          error:
+            "The application model is not ready to deploy, and Copilot could not be asked to complete it: Could not reach the Copilot session to run this command."
+        }
+      });
+      expect(h.runtime.owner.lookup()).toEqual({ kind: "missing" });
+    });
+
+    it("validates the deploy target before it checks the model", async () => {
+      const h = harness();
+      recorded(h, record({ stage: "model" }));
+
+      const response = await h.service.deploy({
+        instanceId: "panel",
+        body: body({ provider: "aws" })
+      });
+
+      expect(response).toEqual({
+        status: 400,
+        body: { error: "The requested deployment provider is not enabled." }
+      });
+      expect(h.dependencies.sendHandoff).not.toHaveBeenCalled();
+    });
+
+    it("leaves a repair redeploy to its attempt", async () => {
+      const h = harness();
+      recorded(h, record({ stage: "model" }));
+
+      await h.service.deploy({
+        instanceId: "panel",
+        body: body({ provider: "azure", attemptId: "attempt-1" })
+      });
+
+      expect(h.dependencies.readModelForSelection).not.toHaveBeenCalled();
+      expect(h.dependencies.sendHandoff).not.toHaveBeenCalled();
+      expect(h.start).toHaveBeenCalledOnce();
+    });
   });
 });

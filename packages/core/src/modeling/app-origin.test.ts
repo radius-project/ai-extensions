@@ -5,7 +5,7 @@ import {
   freshnessIdentity,
   normalizeAppBicep,
   parseAppOrigin,
-  serializeAppOrigin,
+  stagesBeforeDeploy,
   type AppOrigin
 } from "./app-origin.js";
 
@@ -24,7 +24,6 @@ function origin(overrides: Partial<AppOrigin> = {}): AppOrigin {
   return {
     generatedAt: "2026-08-10T23:29:00Z",
     sourceCommit: "a".repeat(40),
-    skillVersion: "0.1.0-edge-0b33186",
     radiusVersion: "0.60",
     appBicepHash: hashAppBicep(MODEL),
     ...overrides
@@ -43,7 +42,31 @@ describe("normalizeAppBicep", () => {
 
 describe("parseAppOrigin", () => {
   it("accepts a complete record", () => {
-    expect(parseAppOrigin(serializeAppOrigin(origin()))).toEqual(origin());
+    expect(parseAppOrigin(JSON.stringify(origin()))).toEqual(origin());
+  });
+
+  it("reads the stage and provider that a stage skill records", () => {
+    expect(
+      parseAppOrigin(
+        JSON.stringify({ ...origin(), stage: "plan", provider: "azure" })
+      )
+    ).toEqual(origin({ stage: "plan", provider: "azure" }));
+  });
+
+  it.each([
+    ["an unknown stage", { stage: "deploy" }],
+    ["a stage that is not a string", { stage: 2 }],
+    ["a blank provider", { provider: " " }]
+  ])("drops %s instead of voiding the record", (_label, fields) => {
+    expect(parseAppOrigin(JSON.stringify({ ...origin(), ...fields }))).toEqual(
+      origin()
+    );
+  });
+
+  it("ignores the skillVersion that older records carry", () => {
+    expect(
+      parseAppOrigin(JSON.stringify({ ...origin(), skillVersion: "0.1.0" }))
+    ).toEqual(origin());
   });
 
   it("trims surrounding whitespace from every field", () => {
@@ -51,18 +74,18 @@ describe("parseAppOrigin", () => {
       JSON.stringify({
         generatedAt: " 2026-08-10T23:29:00Z ",
         sourceCommit: " abc ",
-        skillVersion: " 0.1.0 ",
         radiusVersion: " 0.60 ",
-        appBicepHash: " sha256:xyz "
+        appBicepHash: " sha256:xyz ",
+        provider: " azure "
       })
     );
 
     expect(parsed).toEqual({
       generatedAt: "2026-08-10T23:29:00Z",
       sourceCommit: "abc",
-      skillVersion: "0.1.0",
       radiusVersion: "0.60",
-      appBicepHash: "sha256:xyz"
+      appBicepHash: "sha256:xyz",
+      provider: "azure"
     });
   });
 
@@ -87,12 +110,6 @@ describe("parseAppOrigin", () => {
     }
   );
 
-  it("accepts a record whose generator version could not be resolved", () => {
-    expect(
-      parseAppOrigin(JSON.stringify(origin({ skillVersion: "" })))
-    ).toMatchObject({ skillVersion: "" });
-  });
-
   it("rejects a record whose load-bearing field is blank or the wrong type", () => {
     expect(
       parseAppOrigin(JSON.stringify(origin({ sourceCommit: "  " })))
@@ -100,12 +117,6 @@ describe("parseAppOrigin", () => {
     expect(
       parseAppOrigin(JSON.stringify({ ...origin(), appBicepHash: 3 }))
     ).toBeNull();
-  });
-
-  it("degrades a malformed generator version to unknown instead of voiding the record", () => {
-    expect(
-      parseAppOrigin(JSON.stringify({ ...origin(), skillVersion: 3 }))
-    ).toMatchObject({ skillVersion: "" });
   });
 
   // Every record written before the field existed lacks it. Those models must
@@ -130,34 +141,6 @@ describe("parseAppOrigin", () => {
       ).toMatchObject({ radiusVersion: "" });
     }
   );
-});
-
-describe("serializeAppOrigin", () => {
-  it("writes canonical key order with a trailing newline", () => {
-    expect(serializeAppOrigin(origin())).toBe(
-      `{\n  "generatedAt": "2026-08-10T23:29:00Z",\n  "sourceCommit": "${"a".repeat(
-        40
-      )}",\n  "skillVersion": "0.1.0-edge-0b33186",\n  "radiusVersion": "0.60",\n  "appBicepHash": "${hashAppBicep(
-        MODEL
-      )}"\n}\n`
-    );
-  });
-
-  it("is independent of the input object's key order", () => {
-    const reordered = {
-      appBicepHash: origin().appBicepHash,
-      radiusVersion: origin().radiusVersion,
-      skillVersion: origin().skillVersion,
-      sourceCommit: origin().sourceCommit,
-      generatedAt: origin().generatedAt
-    };
-
-    expect(serializeAppOrigin(reordered)).toBe(serializeAppOrigin(origin()));
-  });
-
-  it("round-trips through the parser", () => {
-    expect(parseAppOrigin(serializeAppOrigin(origin()))).toEqual(origin());
-  });
 });
 
 describe("freshnessIdentity", () => {
@@ -198,7 +181,6 @@ describe("freshnessIdentity", () => {
       origin: {
         generatedAt: "2026-08-11T05:32:32.000Z",
         sourceCommit: "a".repeat(40),
-        skillVersion: "0.1.0-test",
         radiusVersion: "0.60",
         appBicepHash: "sha256:recorded"
       }
@@ -218,7 +200,6 @@ describe("freshnessIdentity", () => {
       origin: {
         generatedAt: "2026-08-11T05:32:32.000Z",
         sourceCommit: "a".repeat(40),
-        skillVersion: "0.1.0-test",
         radiusVersion: "0.60",
         appBicepHash: "sha256:recorded"
       }
@@ -236,7 +217,6 @@ describe("freshnessIdentity", () => {
 describe("evaluateAppModelFreshness", () => {
   const current = {
     headCommit: "a".repeat(40),
-    generatorVersion: "0.1.0-edge-0b33186",
     radiusVersion: "0.60",
     hashAppBicep
   };
@@ -265,7 +245,7 @@ describe("evaluateAppModelFreshness", () => {
     const result = evaluateAppModelFreshness({
       ...current,
       model: MODEL,
-      originText: serializeAppOrigin(origin())
+      originText: JSON.stringify(origin())
     });
 
     expect(result.status).toBe("up-to-date");
@@ -334,13 +314,13 @@ describe("evaluateAppModelFreshness", () => {
   });
 
   // An edit on its own is not a reason to regenerate. The source and the
-  // generator still match, so the model describes the current source, and
+  // Radius version still match, so the model describes the current source, and
   // reporting it would ask the user to justify their own edit on every open.
   it("leaves a hand edit alone when nothing else calls for a regeneration", () => {
     const result = evaluateAppModelFreshness({
       ...current,
       model: `${MODEL}// hand edit\n`,
-      originText: serializeAppOrigin(origin())
+      originText: JSON.stringify(origin())
     });
 
     expect(result.status).toBe("up-to-date");
@@ -354,7 +334,7 @@ describe("evaluateAppModelFreshness", () => {
       ...current,
       sourceChanged: true,
       model: `${MODEL}// hand edit\n`,
-      originText: serializeAppOrigin(origin())
+      originText: JSON.stringify(origin())
     });
 
     expect(result.status).toBe("manually-edited");
@@ -369,7 +349,7 @@ describe("evaluateAppModelFreshness", () => {
       evaluateAppModelFreshness({
         ...current,
         model: MODEL.replace(/\n/gu, "\r\n"),
-        originText: serializeAppOrigin(origin())
+        originText: JSON.stringify(origin())
       }).status
     ).toBe("up-to-date");
   });
@@ -379,7 +359,7 @@ describe("evaluateAppModelFreshness", () => {
       ...current,
       headCommit: "b".repeat(40),
       model: MODEL,
-      originText: serializeAppOrigin(origin())
+      originText: JSON.stringify(origin())
     });
 
     expect(result.status).toBe("source-changed");
@@ -400,7 +380,7 @@ describe("evaluateAppModelFreshness", () => {
       headCommit: "b".repeat(40),
       sourceChanged: false,
       model: MODEL,
-      originText: serializeAppOrigin(origin())
+      originText: JSON.stringify(origin())
     });
 
     expect(result.status).toBe("up-to-date");
@@ -412,7 +392,7 @@ describe("evaluateAppModelFreshness", () => {
       ...current,
       sourceChanged: true,
       model: MODEL,
-      originText: serializeAppOrigin(origin())
+      originText: JSON.stringify(origin())
     });
 
     expect(result.status).toBe("source-changed");
@@ -427,7 +407,7 @@ describe("evaluateAppModelFreshness", () => {
       headCommit: "",
       sourceChanged: true,
       model: MODEL,
-      originText: serializeAppOrigin(origin())
+      originText: JSON.stringify(origin())
     });
 
     expect(result.status).toBe("source-changed");
@@ -444,69 +424,43 @@ describe("evaluateAppModelFreshness", () => {
         headCommit: "b".repeat(40),
         sourceChanged: undefined,
         model: MODEL,
-        originText: serializeAppOrigin(origin())
+        originText: JSON.stringify(origin())
       }).status
     ).toBe("source-changed");
   });
 
-  it("skips the generator check when the record records no version", () => {
-    const result = evaluateAppModelFreshness({
-      ...current,
-      generatorVersion: "9.9.9",
-      model: MODEL,
-      originText: serializeAppOrigin(origin({ skillVersion: "" }))
-    });
-
-    expect(result.status).toBe("up-to-date");
-  });
-
-  it("reports a generator change when the source is unchanged", () => {
-    const result = evaluateAppModelFreshness({
-      ...current,
-      generatorVersion: "0.1.0-edge-9f2c4a1",
-      model: MODEL,
-      originText: serializeAppOrigin(origin())
-    });
-
-    expect(result.status).toBe("generator-changed");
-    expect(result.stale).toBe(true);
-    expect(result.reason).toContain("0.1.0-edge-9f2c4a1");
-  });
-
-  it("prefers the edit signal over source and generator drift", () => {
+  it("prefers the edit signal over source drift", () => {
     expect(
       evaluateAppModelFreshness({
         hashAppBicep,
         headCommit: "b".repeat(40),
-        generatorVersion: "9.9.9",
         model: `${MODEL}// hand edit\n`,
-        originText: serializeAppOrigin(origin())
+        originText: JSON.stringify(origin())
       }).status
     ).toBe("manually-edited");
   });
 
   it.each([
     ["an unresolvable head commit", { headCommit: "" }],
-    ["an absent head commit", { headCommit: null }],
-    ["an unresolvable generator version", { generatorVersion: "  " }],
-    ["an absent generator version", { generatorVersion: undefined }]
+    ["an absent head commit", { headCommit: null }]
   ])("fails open on %s", (_label, unknownFact) => {
     const result = evaluateAppModelFreshness({
       ...current,
       ...unknownFact,
       model: MODEL,
-      originText: serializeAppOrigin(origin())
+      originText: JSON.stringify(origin())
     });
 
     expect(result.status).toBe("up-to-date");
     expect(result.stale).toBe(false);
   });
+
   it("reports a Radius version change when the installed CLI is newer", () => {
     const result = evaluateAppModelFreshness({
       ...current,
       radiusVersion: "0.61",
       model: MODEL,
-      originText: serializeAppOrigin(origin())
+      originText: JSON.stringify(origin())
     });
 
     expect(result.status).toBe("radius-version-changed");
@@ -522,7 +476,7 @@ describe("evaluateAppModelFreshness", () => {
       ...current,
       radiusVersion: "0.61",
       model: `${MODEL}// hand edit\n`,
-      originText: serializeAppOrigin(origin())
+      originText: JSON.stringify(origin())
     });
 
     expect(result.status).toBe("manually-edited");
@@ -530,23 +484,17 @@ describe("evaluateAppModelFreshness", () => {
     expect(result.reason).toContain("the installed Radius CLI uses 0.61");
   });
 
-  it.each([
-    ["the source", { sourceChanged: true }, "source-changed"],
-    ["the generator", { generatorVersion: "9.9.9" }, "generator-changed"]
-  ])(
-    "reports %s ahead of a Radius version change",
-    (_label, otherDrift, status) => {
-      expect(
-        evaluateAppModelFreshness({
-          ...current,
-          ...otherDrift,
-          radiusVersion: "0.61",
-          model: MODEL,
-          originText: serializeAppOrigin(origin())
-        }).status
-      ).toBe(status);
-    }
-  );
+  it("reports a source change ahead of a Radius version change", () => {
+    expect(
+      evaluateAppModelFreshness({
+        ...current,
+        sourceChanged: true,
+        radiusVersion: "0.61",
+        model: MODEL,
+        originText: JSON.stringify(origin())
+      }).status
+    ).toBe("source-changed");
+  });
 
   // A teammate on an older plugin cannot regenerate this model, and if they
   // could, it would move the model back to older types for everyone else. So it
@@ -554,7 +502,6 @@ describe("evaluateAppModelFreshness", () => {
   it.each([
     ["nothing else changed", {}, MODEL],
     ["the source also changed", { sourceChanged: true }, MODEL],
-    ["the generator also changed", { generatorVersion: "9.9.9" }, MODEL],
     ["the model was also edited", { sourceChanged: true }, `${MODEL}// edit\n`]
   ])(
     "reports an older installed CLI without asking for a refresh when %s",
@@ -564,7 +511,7 @@ describe("evaluateAppModelFreshness", () => {
         ...otherDrift,
         radiusVersion: "0.59",
         model,
-        originText: serializeAppOrigin(origin())
+        originText: JSON.stringify(origin())
       });
 
       expect(result.status).toBe("radius-cli-outdated");
@@ -587,7 +534,7 @@ describe("evaluateAppModelFreshness", () => {
       ...current,
       radiusVersion: installed,
       model: MODEL,
-      originText: serializeAppOrigin(origin({ radiusVersion: saved }))
+      originText: JSON.stringify(origin({ radiusVersion: saved }))
     });
 
     expect(result.status).toBe("up-to-date");
@@ -600,8 +547,65 @@ describe("evaluateAppModelFreshness", () => {
         ...current,
         radiusVersion: undefined,
         model: MODEL,
-        originText: serializeAppOrigin(origin())
+        originText: JSON.stringify(origin())
       }).status
     ).toBe("up-to-date");
+  });
+});
+
+describe("stagesBeforeDeploy", () => {
+  const hash = hashAppBicep(MODEL);
+
+  it.each([
+    ["a Stage 1 model", { stage: "model" }, "azure", ["plan", "complete"]],
+    [
+      "a model planned for another provider",
+      { stage: "complete", provider: "aws" },
+      "azure",
+      ["plan", "complete"]
+    ],
+    [
+      "a completed model that was never planned",
+      { stage: "complete" },
+      "azure",
+      ["plan", "complete"]
+    ],
+    [
+      "a planned model",
+      { stage: "plan", provider: "azure" },
+      "azure",
+      ["complete"]
+    ],
+    [
+      "a Stage 1 model for a provider that Stage 2 cannot plan",
+      { stage: "model" },
+      "aws",
+      ["complete"]
+    ],
+    [
+      "a completed model",
+      { stage: "complete", provider: "azure" },
+      "azure",
+      []
+    ],
+    [
+      "a completed model for a provider that Stage 2 cannot plan",
+      { stage: "complete", provider: "azure" },
+      "aws",
+      []
+    ],
+    ["a record from the single-stage skill", {}, "azure", []]
+  ] as const)("asks %s for %j", (_label, fields, provider, stages) => {
+    expect(stagesBeforeDeploy(origin(fields), hash, provider)).toEqual(stages);
+  });
+
+  it("deploys a model with no record as it is", () => {
+    expect(stagesBeforeDeploy(null, hash, "azure")).toEqual([]);
+  });
+
+  it("deploys an edited model as it is", () => {
+    expect(
+      stagesBeforeDeploy(origin({ stage: "model" }), "sha256:edited", "azure")
+    ).toEqual([]);
   });
 });

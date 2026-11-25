@@ -2,11 +2,12 @@ import type {
   CommittedModelIdentity,
   ManagedModelStaging,
   ObservedModelFile
-} from "../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
+} from "../app-model-staging.js";
 import { isRadProcessExitUnconfirmed } from "@radius-project/adapter-shared";
 
+// Runs the stage's check on a copy of the run in `stagingDir`.
 export type AuthoringValidator = (
-  appFile: string,
+  stagingDir: string,
   signal: AbortSignal
 ) => Promise<void>;
 
@@ -25,8 +26,6 @@ interface AuthoringRequest {
   validation: AbortController;
   current(): boolean;
   settled?(promoted: boolean, identity?: CommittedModelIdentity): void;
-  publications: Set<Promise<unknown>>;
-  outcomes: Map<string, { failed: boolean }>;
   finalizing: boolean;
   promoted: boolean;
   identity?: CommittedModelIdentity;
@@ -151,8 +150,6 @@ export function createModelAuthoringOwner(ports: {
         validation: new AbortController(),
         current,
         settled,
-        publications: new Set(),
-        outcomes: new Map(),
         finalizing: false,
         promoted: false,
         mode
@@ -217,57 +214,9 @@ export function createModelAuthoringOwner(ports: {
       for (const request of requests.values()) {
         if (request.target.workspace === workspace && request.current()) {
           throw new Error(
-            "This worktree has an active managed Radius authoring request; use its request token."
+            "This worktree has an active managed Radius authoring request. Publish after it completes or is cancelled."
           );
         }
-      }
-    },
-    async publish<T>(
-      token: string,
-      publicationKey: (
-        target: Readonly<AuthoringTarget>,
-        stagingDir: string
-      ) => string,
-      enqueue: <Result>(
-        key: string,
-        work: () => Promise<Result>
-      ) => Promise<Result>,
-      start: (
-        staging: ManagedModelStaging,
-        target: Readonly<AuthoringTarget>,
-        guards: {
-          prepareSpawn(): Promise<void>;
-          assertCurrent(): void;
-          beforeSpawn(): void;
-        }
-      ) => Promise<T>
-    ): Promise<T> {
-      const request = requestFor(token);
-      assertCurrent(request);
-      if (request.finalizing)
-        throw new Error("The Radius authoring request is already finalizing.");
-      const key = publicationKey(request.target, request.staging.stagingDir);
-      const outcome = { failed: false };
-      request.outcomes.set(key, outcome);
-      const guards = {
-        prepareSpawn: () => assertCurrentTarget(request),
-        assertCurrent: () => assertCurrent(request),
-        beforeSpawn: () => assertCurrentBaseline(request)
-      };
-      // Take the target slot before a slower source read can let later work pass.
-      const publication = enqueue(key, async () => {
-        await assertCurrentTarget(request);
-        assertCurrentBaseline(request);
-        return start(request.staging, request.target, guards);
-      }).catch((error: unknown) => {
-        outcome.failed = true;
-        throw error;
-      });
-      request.publications.add(publication);
-      try {
-        return await drainable(publication);
-      } finally {
-        request.publications.delete(publication);
       }
     },
     async finish(token: string) {
@@ -279,17 +228,11 @@ export function createModelAuthoringOwner(ports: {
       return drainable(
         (async () => {
           try {
-            await Promise.allSettled(request.publications);
-            assertCurrent(request);
-            if ([...request.outcomes.values()].some(({ failed }) => failed)) {
-              throw new Error(
-                "A required Radius publication failed. Restart authoring before promoting."
-              );
-            }
             await assertCurrentTarget(request);
             assertCurrentBaseline(request);
             await request.staging.validate(
-              (appFile) => request.validate(appFile, request.validation.signal),
+              (stagingDir) =>
+                request.validate(stagingDir, request.validation.signal),
               isRadProcessExitUnconfirmed
             );
             return await request.staging.promote(

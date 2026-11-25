@@ -12,14 +12,7 @@ export default defineConfig({
       provider: "v8",
       reportOnFailure: true,
       reporter: ["text", "json-summary", "lcov"],
-      include: [
-        "packages/*/src/**/*.ts",
-        "packages/*/src/**/*.mjs",
-        "extensions/radius/skills/radius-app-bicep/scripts/show-radius-type.mjs",
-        "extensions/radius/skills/radius-app-bicep/scripts/bicep-security-rules.mjs",
-        "extensions/radius/skills/radius-app-bicep/scripts/radius-recipe-pack.mjs",
-        "extensions/radius/skills/radius-app-bicep/scripts/radius-type-schema.mjs"
-      ],
+      include: ["packages/*/src/**/*.ts", "packages/*/src/**/*.mjs"],
       exclude: ["packages/*/src/**/*.test.ts"],
       thresholds: {
         ...coverageBaseline.aggregate,
@@ -103,34 +96,6 @@ export default defineConfig({
           functions: 100,
           lines: 100
         },
-        "extensions/radius/skills/radius-app-bicep/scripts/show-radius-type.mjs":
-          {
-            statements: 100,
-            branches: 100,
-            functions: 100,
-            lines: 100
-          },
-        "extensions/radius/skills/radius-app-bicep/scripts/bicep-security-rules.mjs":
-          {
-            statements: 100,
-            branches: 100,
-            functions: 100,
-            lines: 100
-          },
-        "extensions/radius/skills/radius-app-bicep/scripts/radius-recipe-pack.mjs":
-          {
-            statements: 100,
-            branches: 100,
-            functions: 100,
-            lines: 100
-          },
-        "extensions/radius/skills/radius-app-bicep/scripts/radius-type-schema.mjs":
-          {
-            statements: 100,
-            branches: 100,
-            functions: 100,
-            lines: 100
-          },
         "packages/adapter-canvas/src/**":
           coverageBaseline.packages["adapter-canvas"],
         "packages/adapter-shared/src/**":

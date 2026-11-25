@@ -13,7 +13,7 @@ export interface GraphModelingFailureElements {
 }
 
 export const UNSUPPORTED_GRAPH_MODEL_MESSAGE =
-  "The Radius app-bicep skill cannot model this repository.";
+  "Radius cannot model this repository.";
 
 export function unsupportedGraphModelMessage(payload: unknown): string | null {
   if (!readBoolean(payload, "appBicepUnsupported")) return null;

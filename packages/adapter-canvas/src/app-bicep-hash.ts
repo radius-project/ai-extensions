@@ -5,10 +5,10 @@
 // import `node:crypto`. Core owns the normalization (which text differences are
 // meaningful) and injects this function to do the hashing.
 //
-// The algorithm and output format must stay byte-compatible with the plugin's
-// `write-app-origin.mjs`, which re-implements them because it ships inside the
-// installed plugin where the workspace packages do not exist. A collocated
-// contract test asserts the two agree.
+// The algorithm and output format must stay byte-compatible with `hashModel` in
+// each modeling skill's `scripts/common.mjs`, which re-implements them because
+// it ships inside the installed plugin where the workspace packages do not
+// exist. `app-origin-writer.test.ts` asserts the two agree.
 
 import { createHash } from "node:crypto";
 import { normalizeAppBicep } from "@radius-project/core";

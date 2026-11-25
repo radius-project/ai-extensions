@@ -8,7 +8,12 @@ import { errorMessage } from "./util.js";
 import type {
   CommittedModelIdentity,
   ObservedModelFile
-} from "../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
+} from "../app-model-staging.js";
+
+// How the agent finishes a run that the Canvas started. The skill's own
+// instructions start and publish a run themselves; this replaces those steps.
+export const MANAGED_RUN_INSTRUCTION =
+  'The Canvas already started this run in stagingDir. Do not run the begin or abort commands of model.mjs. Write only in stagingDir, and run model.mjs check with stagingDir until it reports no problems. The check does not publish this run. Then call radius_complete_app_authoring with requestToken and outcome "complete": the Canvas checks the run again and publishes it. Only kind "promoted" means that the model was published. If gitError is not empty, tell the user that the files are written but not staged in git. If the tool refuses, report its error, and do not publish the model another way. If the error says that recovery files remain, report their path and do not start another run. To stop without a model, for example when the model already exists or the user declines, call radius_complete_app_authoring with outcome "cancel". When a modeling failure must be reported with radius_report_modeling_failure, report it first: that also ends the run.';
 
 export function readCanvasAuthoringBootstrap(skillHandoff: string) {
   const handoff: unknown = JSON.parse(skillHandoff);
@@ -139,31 +144,34 @@ export function createCanvasModelAuthoring(
           sourceRevision: revision
         },
         current,
-        async (appFile, signal) => {
+        // Final validation runs the Stage 1 check on a copy of the run. The
+        // run's `run.json` stops the check from publishing it.
+        async (runDir, signal) => {
           try {
             await deps.process.runValidator(
               node,
-              [
-                join(skillBase, "scripts", "validate-bicep.mjs"),
-                appFile,
-                "--managed-final"
-              ],
+              [join(skillBase, "scripts", "model.mjs"), "check", runDir],
               {
                 cwd: workspace,
-                timeout: 120_000,
+                timeout: 300_000,
                 signal,
-                label: "Radius model validator"
+                label: "Radius model check"
               }
             );
           } catch (error) {
-            const stderr =
-              error instanceof Error ? Reflect.get(error, "stderr") : undefined;
+            // The check prints its problems last, on stdout.
+            const output = (name: string) => {
+              const text =
+                error instanceof Error ? Reflect.get(error, name) : undefined;
+              return typeof text === "string" ? text.trim() : "";
+            };
+            const stdout = output("stdout");
             const diagnostic =
-              typeof stderr === "string" && stderr.trim() ?
-                stderr.trim()
-              : errorMessage(error);
+              stdout.slice(Math.max(0, stdout.indexOf("Problems:"))) ||
+              output("stderr") ||
+              errorMessage(error);
             throw new Error(
-              `Radius model validation failed: ${redactCredentials(diagnostic).slice(0, 4000)}`,
+              `The Radius model check failed: ${redactCredentials(diagnostic).slice(0, 4000)}`,
               { cause: error }
             );
           }
@@ -180,7 +188,11 @@ export function createCanvasModelAuthoring(
       return JSON.stringify({
         ...handoff,
         repoPath: workspace,
-        managedAuthoring: { requestToken: token, stagingDir }
+        managedAuthoring: {
+          requestToken: token,
+          stagingDir,
+          instruction: MANAGED_RUN_INSTRUCTION
+        }
       });
     }
   };

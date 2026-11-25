@@ -151,7 +151,7 @@ test.describe("generateEnvironmentName", () => {
 
 test("modelingPrompt names the skill and forbids commit, push, and deploy", () => {
   const prompt = modelingPrompt();
-  expect(prompt).toContain("radius-app-bicep");
+  expect(prompt).toContain("radius-app-model");
   expect(prompt).toContain("Do not commit or push");
   expect(prompt).toContain("Do not deploy");
 });

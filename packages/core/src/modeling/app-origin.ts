@@ -1,23 +1,24 @@
-// Generation origin record for the skill-authored application model.
+// Origin record for the skill-authored application model.
 //
-// `.radius/app.bicep` is written by the radius-app-bicep skill, but the graph
-// views only ever asked "does the file exist?" before rendering it. A model that
-// was generated from an older commit, or by an older generator, still exists,
-// so the graph silently showed a picture of source that has since moved on.
+// `.radius/app.bicep` is written by the Radius modeling skills, one for each
+// stage: radius-app-model (Stage 1), radius-app-plan (Stage 2), and
+// radius-app-complete (Stage 3). A model that was generated from an older
+// commit still exists, so without a record the graph would silently show a
+// picture of source that has since moved on.
 //
-// The skill therefore writes a sibling `.radius/app.origin.json` on every
-// generation recording what the model was generated FROM. This module owns that
-// record's format and the freshness decision made from it. It is pure: callers
-// supply the model text, the origin text, the branch head commit, and the current
-// generator version, and get back a classification.
+// Each stage therefore writes a sibling `.radius/app.origin.json` when its check
+// passes, recording what the model was generated FROM and which stage it passed.
+// This module owns reading that record and the freshness decision made from it.
+// It is pure: callers supply the model text, the origin text, and the branch head
+// commit, and get back a classification.
 //
-// Validity is derived from the origin record rather than re-proved by compiling on every
-// open. The skill only writes the record after its bundled Bicep checker exits
-// clean, so a record whose `appBicepHash` still matches the file on disk is a
-// statement that those exact bytes compiled without errors or warnings. When the
-// hash does not match (or there is no record at all) the model is simply
+// A record whose `appBicepHash` still matches the file on disk states that those
+// exact bytes passed the check of the stage the record names. That is not the
+// same as "compiles with zero warnings": a Stage 1 model compiles with BCP035
+// warnings, because Stage 3 adds the credentials the database types require.
+// When the hash does not match (or there is no record at all) the model is
 // unverified, which this module reports so the caller can route it back through
-// the skill instead of rendering a possibly-broken model.
+// the skill.
 
 import { compareRadiusVersions } from "./radius-version.js";
 
@@ -25,30 +26,36 @@ import { compareRadiusVersions } from "./radius-version.js";
 export const APP_ORIGIN_REPO_PATH = ".radius/app.origin.json";
 
 // Older layouts keep the model at the repository root, and the record is written
-// beside whichever model the generator wrote, so readers must check both.
+// beside whichever model the skill wrote, so readers must check both.
 export const APP_ORIGIN_ROOT_PATH = "app.origin.json";
+
+// The modeling stages, in order. Each skill records the stage whose check passed.
+const APP_MODEL_STAGES = ["model", "plan", "complete"] as const;
+export type AppModelStage = (typeof APP_MODEL_STAGES)[number];
 
 export interface AppOrigin {
   // ISO-8601 timestamp of the generation that produced the model.
   generatedAt: string;
   // Full commit SHA of the source the model was generated from.
   sourceCommit: string;
-  // Version of the generator (the bundled radius-app-bicep skill) that ran.
-  // May be empty when the writer could not resolve it; the generator-drift check
-  // is skipped then rather than treating "unknown" as a version that differs.
-  skillVersion: string;
   // Radius version the app model was checked against: the tag of the Radius
   // Bicep extension in the pin the Bicep checker compiled with, such as `0.60`,
   // `0.61.0-rc1`, or `latest`. Empty when the writer could not read the pin, and
   // in every record written before the field existed. The Radius version check
-  // is skipped then, for the same reason as a blank `skillVersion`.
+  // is skipped then rather than treating "unknown" as a version that differs.
   radiusVersion: string;
-  // `sha256:<hex>` fingerprint of app.bicep exactly as the generator wrote it.
+  // `sha256:<hex>` fingerprint of app.bicep exactly as the skill wrote it.
   // Re-fingerprinting the file on disk and comparing answers two questions at
-  // once: whether a human has edited it since, and (because the generator
-  // records only after its Bicep checker passes) whether the bytes now on disk
-  // are the ones that were proven to compile.
+  // once: whether a human has edited it since, and (because the skill records
+  // only after its check passes) whether the bytes now on disk are the ones
+  // that passed.
   appBicepHash: string;
+  // The stage whose check passed. Absent in records that the earlier
+  // single-stage skill wrote, and when the value is not a known stage.
+  stage?: AppModelStage;
+  // The cloud provider the model was planned for, such as `azure`. Present
+  // from Stage 2 on.
+  provider?: string;
 }
 
 export type AppModelFreshnessStatus =
@@ -64,8 +71,6 @@ export type AppModelFreshnessStatus =
   | "manually-edited"
   // Source moved on since the model was generated.
   | "source-changed"
-  // A different generator version produced the model.
-  | "generator-changed"
   // The installed Radius CLI uses a newer Radius version than the model was
   // checked against, so the model may no longer compile.
   | "radius-version-changed"
@@ -116,8 +121,6 @@ export interface AppModelFreshnessInput {
   // commit that model recorded, so every committed model would immediately
   // report itself stale, regenerate, and be stale again on the next commit.
   sourceChanged?: boolean;
-  // Current generator version. Empty when it could not be resolved.
-  generatorVersion?: string | null;
   // Radius version the installed Radius CLI compiles with, in the same form as
   // `AppOrigin.radiusVersion`. Empty when it could not be resolved.
   radiusVersion?: string | null;
@@ -154,10 +157,12 @@ export function normalizeAppBicep(content: string): string {
 // malformed JSON, a non-object, or a missing/blank `generatedAt`,
 // `sourceCommit`, or `appBicepHash`. Those three are load-bearing: without any
 // one of them the record cannot answer the question it exists to answer.
-// `skillVersion` and `radiusVersion` are allowed to be blank: an unresolvable
-// version is a missing fact, and the writer recording it as such is better than
-// refusing to record it at all, which would report every generated model as
-// unverified. A record written before `radiusVersion` existed reads as blank.
+// `radiusVersion` is allowed to be blank: an unresolvable version is a missing
+// fact, and the writer recording it as such is better than refusing to record
+// it at all, which would report every generated model as unverified. A record
+// written before `radiusVersion` existed reads as blank. An unknown `stage` is
+// dropped rather than voiding the record, and the `skillVersion` field that
+// older records carry is ignored.
 export function parseAppOrigin(text: unknown): AppOrigin | null {
   if (typeof text !== "string" || !text.trim()) return null;
   let parsed: unknown;
@@ -170,34 +175,20 @@ export function parseAppOrigin(text: unknown): AppOrigin | null {
     return null;
   }
   const fields = parsed as Record<string, unknown>;
+  const stage = APP_MODEL_STAGES.find((known) => known === fields.stage);
+  const provider = optionalString(fields.provider);
   const origin: AppOrigin = {
     generatedAt: optionalString(fields.generatedAt),
     sourceCommit: optionalString(fields.sourceCommit),
-    skillVersion: optionalString(fields.skillVersion),
     radiusVersion: optionalString(fields.radiusVersion),
-    appBicepHash: optionalString(fields.appBicepHash)
+    appBicepHash: optionalString(fields.appBicepHash),
+    ...(stage ? { stage } : {}),
+    ...(provider ? { provider } : {})
   };
   if (!origin.generatedAt || !origin.sourceCommit || !origin.appBicepHash) {
     return null;
   }
   return origin;
-}
-
-// Canonical serialization: fixed key order, two-space indent, trailing newline.
-// The record is machine-written and machine-read, so a stable byte layout keeps
-// a regeneration from showing up as a diff when nothing actually changed.
-export function serializeAppOrigin(origin: AppOrigin): string {
-  return `${JSON.stringify(
-    {
-      generatedAt: origin.generatedAt,
-      sourceCommit: origin.sourceCommit,
-      skillVersion: origin.skillVersion,
-      radiusVersion: origin.radiusVersion,
-      appBicepHash: origin.appBicepHash
-    },
-    null,
-    2
-  )}\n`;
 }
 
 function freshness(
@@ -237,7 +228,6 @@ function freshness(
 export function freshnessIdentity(status: AppModelFreshness): string {
   return [
     status.origin?.sourceCommit ?? "",
-    status.origin?.skillVersion ?? "",
     status.origin?.radiusVersion ?? "",
     status.origin ? "" : status.appBicepHash,
     status.requiresConfirmation ? "confirm" : "auto"
@@ -251,7 +241,7 @@ export function freshnessIdentity(status: AppModelFreshness): string {
 //
 // A manual edit is deliberately checked LAST, against the others, rather than
 // first. On its own an edit is not a reason to regenerate: if the source and the
-// generator both still match, the model describes the current source and the
+// Radius version both still match, the model describes the current source and the
 // only thing we cannot say is that we wrote it. Reporting that would ask the
 // user to justify their own edit on every graph open, forever, since an edit is
 // permanent and there is no way for them to accept it. So an edit only matters
@@ -325,17 +315,10 @@ export function evaluateAppModelFreshness(
   const sourceMoved =
     input.sourceChanged ??
     (headCommit ? headCommit !== origin.sourceCommit : false);
-  const generatorVersion = optionalString(input.generatorVersion);
-  const generatorMoved = Boolean(
-    generatorVersion &&
-    origin.skillVersion &&
-    generatorVersion !== origin.skillVersion
-  );
   const radiusMoved = radiusOrder !== null && radiusOrder < 0;
 
   const drifted: AppModelFreshnessStatus | null =
     sourceMoved ? "source-changed"
-    : generatorMoved ? "generator-changed"
     : radiusMoved ? "radius-version-changed"
     : null;
   // A head that still matches the recorded commit means the change is only in
@@ -349,8 +332,6 @@ export function evaluateAppModelFreshness(
   const driftReason =
     sourceMoved ?
       `The model was generated from commit ${origin.sourceCommit}, but ${sourceChange}, so it may no longer describe the current source.`
-    : generatorMoved ?
-      `The model was generated by radius-app-bicep ${origin.skillVersion}, but ${generatorVersion} is installed now.`
     : `The model was generated with Radius ${origin.radiusVersion}, but the installed Radius CLI uses ${radiusVersion}, so it may no longer compile.`;
 
   if (!drifted) {
@@ -376,4 +357,26 @@ export function evaluateAppModelFreshness(
   }
 
   return freshness(drifted, driftReason, origin, false, appBicepHash);
+}
+
+// Providers that the radius-app-plan skill can plan a model for. A deploy to any
+// other provider needs only Stage 3, because Stage 2 cannot run for it.
+const PLANNABLE_PROVIDERS: ReadonlySet<string> = new Set(["azure"]);
+
+// The stages that a model still needs before it deploys to `provider`, in
+// order. Only a model that a stage skill recorded is judged. A hand-written or
+// hand-edited model (no record, or a record whose hash no longer matches), and
+// a model from the earlier single-stage skill (a record with no stage), deploy
+// as they are.
+export function stagesBeforeDeploy(
+  origin: AppOrigin | null,
+  appBicepHash: string,
+  provider: string
+): Array<"plan" | "complete"> {
+  if (!origin?.stage || origin.appBicepHash !== appBicepHash) return [];
+  const planned = origin.stage !== "model" && origin.provider === provider;
+  if (!planned && PLANNABLE_PROVIDERS.has(provider)) {
+    return ["plan", "complete"];
+  }
+  return origin.stage === "complete" ? [] : ["complete"];
 }

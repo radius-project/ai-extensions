@@ -1,6 +1,6 @@
 // Runs Copilot CLI on one case from `cases/` with the Radius plugin built
 // from this checkout. It sends the dataset prompt and checks that the agent
-// loads the `radius-app-bicep` skill and publishes `.radius/app.bicep`.
+// loads the `radius-app-model` skill and publishes `.radius/app.bicep`.
 //
 // The CLI runs with the settings that the GitHub Copilot app uses: the CLI
 // version that the app bundles, Autopilot, and all permissions allowed. See
@@ -45,7 +45,7 @@ export const DATASET_PROMPT = "Model my app as a Radius application";
 export const TOKEN_VARIABLE = "COPILOT_GITHUB_TOKEN";
 
 /** The plugin skill that models the app. A passing run must load it. */
-export const MODELING_SKILL = "radius-app-bicep";
+export const MODELING_SKILL = "radius-app-model";
 
 /**
  * The time from the start of the run to the end of the session, including
@@ -161,7 +161,7 @@ export function cliVersionOf(output) {
 }
 
 /**
- * The `appBicepHash` that the skill's `write-app-origin.mjs` records: the
+ * The `appBicepHash` that the skill's check records in `app.origin.json`: the
  * SHA-256 of the model with CRLF, trailing blanks, and the final newlines
  * removed.
  */
@@ -181,7 +181,7 @@ function appBicepHash(appBicep) {
  *   run found none.
  * @param appBicep The text of `.radius/app.bicep`, if it exists.
  * @param appOrigin The text of `.radius/app.origin.json`, if it exists. The
- *   skill writes it with the model's hash when it publishes the model.
+ *   skill's check writes it with the model's hash when the model passes.
  */
 export function outcomeFailure({ session, appBicep, appOrigin }) {
   if (session?.state.kind === "failed")

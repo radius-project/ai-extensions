@@ -5,7 +5,6 @@ export default defineConfig({
     include: [
       "src/deploy-artifacts.test.ts",
       "../core/src/deployment-resource-status.test.ts",
-      "src/promote-app-model.test.ts",
       "../core/src/modeling/app-authoring.test.ts",
       "../adapter-shared/src/environment-inspection.test.ts",
       "../core/src/modeling/app-staging.test.ts",
@@ -66,6 +65,7 @@ export default defineConfig({
       "src/runtime/app-model-handoff.test.ts",
       "src/runtime/canvas-model-authoring.test.ts",
       "src/runtime/model-authoring-owner.test.ts",
+      "src/app-model-staging.test.ts",
       "src/runtime/modeling-activity.test.ts",
       "src/runtime/create-radius-canvas.test.ts",
       "src/graph-source-options.test.ts",
@@ -129,8 +129,7 @@ export default defineConfig({
       "test/integration/runtime/aws-cleanup-stop-points.test.ts",
       "test/e2e-cloud/support/copilot-app-*.test.ts",
       "test/e2e/support/**/*.test.ts",
-      "test/integration/http/**/*.test.ts",
-      "test/integration/runtime/bicep-security-rules.test.ts"
+      "test/integration/http/**/*.test.ts"
     ],
     environment: "node",
     testTimeout: 15_000,

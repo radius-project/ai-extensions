@@ -548,6 +548,8 @@ describe("shared deployment runtime through production Canvas HTTP", () => {
 
   it("survives close, reattaches on reopen, and keeps active reset independent of target locks", async () => {
     const h = harness();
+    // Admission reads the model's origin record. With none, it deploys.
+    h.modelSources.set(".radius/app.origin.json", null);
     const entry = await h.server.getOrCreateServer("panel", "deploying");
     const response = await post(entry, "/api/deploy", target);
     expect(response.status).toBe(200);
@@ -606,7 +608,15 @@ describe("shared deployment runtime through production Canvas HTTP", () => {
       expect(blocked.status, route).toBe(409);
       await blocked.json();
     }
-    expect(h.cli).not.toHaveBeenCalled();
+    expect(h.cli.mock.calls.map(([command, args]) => [command, args])).toEqual([
+      [
+        "gh",
+        [
+          "api",
+          "/repos/acme/widgets/contents/.radius/app.origin.json?ref=feature"
+        ]
+      ]
+    ]);
     expect(h.resolveDeployment).toHaveBeenCalledOnce();
     h.finished.resolve();
     await vi.waitFor(() =>

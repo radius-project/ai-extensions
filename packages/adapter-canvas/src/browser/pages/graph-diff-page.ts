@@ -217,7 +217,7 @@ export function initializeGraphDiffPage(
         } else if (readBoolean(payload, "needsAppBicep")) {
           showStatus(
             context,
-            "Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the diff will appear once it is saved.",
+            "Copilot is generating .radius/app.bicep with the radius-app-model skill… the diff will appear once it is saved.",
             "info"
           );
           // Nothing announces the model's arrival, so the diff only learns by

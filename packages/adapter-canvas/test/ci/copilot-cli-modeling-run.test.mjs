@@ -215,7 +215,7 @@ describe("run options", () => {
     requestedReasoningEffort: "medium",
     sessionId: "s1",
     models: ["model-a"],
-    skills: ["radius-app-bicep"],
+    skills: ["radius-app-model"],
     tools: { view: 2, bash: 1 },
     usage: {
       calls: 3,
@@ -313,10 +313,10 @@ describe("the pass rule", () => {
     ["no skill", []],
     ["only other skills", ["git-commit"]],
     ["a skill with the same name from the project", [MODELING_SKILL]],
-    ["the same skill name from another plugin", ["other:radius-app-bicep"]]
+    ["the same skill name from another plugin", ["other:radius-app-model"]]
   ])("fails when the agent writes app.bicep but loads %s", (_name, skills) => {
     expect(outcomeFailure({ session: session(skills), ...published })).toBe(
-      "The agent wrote .radius/app.bicep without loading the radius-app-bicep skill from the radius plugin."
+      "The agent wrote .radius/app.bicep without loading the radius-app-model skill from the radius plugin."
     );
   });
 
@@ -339,13 +339,13 @@ describe("the pass rule", () => {
     expect(
       outcomeFailure({ session: session([PLUGIN_SKILL]), appBicep, appOrigin })
     ).toBe(
-      "The agent wrote .radius/app.bicep without a matching .radius/app.origin.json, so the radius-app-bicep skill did not publish it."
+      "The agent wrote .radius/app.bicep without a matching .radius/app.origin.json, so the radius-app-model skill did not publish it."
     );
   });
 
   it("fails when the run finds no session events to check", () => {
     expect(outcomeFailure({ session: undefined, ...published })).toBe(
-      "The run found no session events, so it cannot tell whether the agent loaded the radius-app-bicep skill."
+      "The run found no session events, so it cannot tell whether the agent loaded the radius-app-model skill."
     );
   });
 
@@ -552,7 +552,7 @@ const sessionDir = path.join(process.env.HOME, ".copilot", "session-state", "s1"
 fs.mkdirSync(sessionDir, { recursive: true });
 fs.writeFileSync(
   path.join(sessionDir, "events.jsonl"),
-  JSON.stringify({ type: "skill.invoked", data: { name: "radius-app-bicep", pluginName: "radius" } }) + "\\n"
+  JSON.stringify({ type: "skill.invoked", data: { name: "radius-app-model", pluginName: "radius" } }) + "\\n"
 );
 console.log("token " + token);
 const mode = process.env.FAKE_COPILOT_MODE;

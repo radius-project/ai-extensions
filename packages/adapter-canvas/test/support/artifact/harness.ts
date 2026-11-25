@@ -38,11 +38,9 @@ export interface ArtifactRegistrationSnapshot {
     skill: string;
     repoPathMatchesWorkspace: boolean;
     skillBaseRelativeToArtifact: string;
-    skillVersionMatchesPackage: boolean;
     nodeCommandRunsScripts: boolean;
     instruction: string;
     requiredFiles: string[];
-    containsLegacyInlinedHeading: boolean;
   };
 }
 

@@ -464,7 +464,7 @@ export function initializeGraphPage(
         if (readBoolean(payload, "needsAppBicep")) {
           showStatus(
             context,
-            "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…",
+            "Copilot is generating .radius/app.bicep with the radius-app-model skill…",
             "info"
           );
           retry = entry.after(graphRetryDelayMs(loadRetryAttempt++), () => {
@@ -617,7 +617,7 @@ export function initializeGraphPage(
             // answer on the error path below.
             showStatus(
               context,
-              "Copilot is rebuilding the application graph from .radius/app.bicep with the Radius app-bicep skill.",
+              "Copilot is rebuilding the application graph from .radius/app.bicep with the radius-app-model skill.",
               "info"
             );
             retry = entry.after(

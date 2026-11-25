@@ -26,7 +26,7 @@ export function cloudModelingPrompt(applicationName: string): string {
     );
   return [
     "The test has removed the old .radius folder. Do not restore it from Git.",
-    "Use the radius-app-bicep skill to generate a new Radius application model in .radius/app.bicep.",
+    "Use the radius-app-model skill to generate a new Radius application model in .radius/app.bicep, then use the radius-app-plan and radius-app-complete skills to make it ready to deploy.",
     `Name the Radius application "${applicationName}".`,
     "Do not commit, push, or deploy. Stop when the model files are written."
   ].join(" ");
@@ -132,7 +132,8 @@ export interface ModelReadiness {
  * The model is ready when every model file exists, every file was written
  * after baseline removal, no file changed since the previous poll, and the session
  * explicitly reports idle. The origin must record this generation, source
- * commit, and normalized model hash; checkout timestamps alone are not evidence.
+ * commit, normalized model hash, and the completed stage; checkout timestamps
+ * alone are not evidence.
  */
 export function classifyModelReadiness(
   input: ModelReadinessInput
@@ -159,6 +160,7 @@ export function classifyModelReadiness(
       !input.model?.trim() || origin.appBicepHash !== hashAppBicep(input.model)
     ) ?
       "origin does not match the model"
+    : origin.stage !== "complete" ? "origin does not record a completed model"
     : undefined;
   return {
     ready:

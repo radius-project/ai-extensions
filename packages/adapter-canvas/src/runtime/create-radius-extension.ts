@@ -219,7 +219,7 @@ export function createRadiusExtension(
       evaluateAppSourceForBranch(repo, branch, state),
     send: (message) =>
       Promise.resolve(deps.session.get().send(message)).then(() => undefined),
-    skillHandoff: async () => deps.radiusAppBicepSkill(),
+    skillHandoff: async () => deps.radiusSkillHandoff("radius-app-model"),
     readSourceRevision: (repo, branch, context) =>
       readSelectedSourceRevision(context, repo, branch, {
         isWorkspaceSelection: deps.workspace.isWorkspaceSelection,

@@ -100,7 +100,6 @@ export interface AppModelEvidenceReads {
   headCommit(): Promise<string>;
   sourceChangedSince(commit: string): Promise<boolean | undefined>;
   modelRecoverable(): Promise<boolean | undefined>;
-  generatorVersion(): string;
   radiusVersion(): Promise<string>;
   hashAppBicep(content: string): string;
 }
@@ -150,7 +149,6 @@ export async function readAppModelEvidence(
     headCommit,
     sourceChanged,
     modelRecoverable,
-    generatorVersion: ports.generatorVersion(),
     radiusVersion,
     hashAppBicep: ports.hashAppBicep
   });

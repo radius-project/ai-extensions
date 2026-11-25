@@ -38,7 +38,7 @@ import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.j
 import { missingModelHandoffTarget } from "./missing-model-handoff-claims.js";
 import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../graph-progress-contract.js";
 import { appModelTargetKey } from "../app-model-authoring-failure.js";
-import type { CommittedModelIdentity } from "../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
+import type { CommittedModelIdentity } from "../app-model-staging.js";
 import { errorMessage } from "./util.js";
 import {
   readCanvasAuthoringBootstrap,
@@ -96,7 +96,7 @@ export interface AppModelHandoffDependencies {
     state: CanvasState
   ): Promise<AppSourceEvaluation>;
   send(message: HandoffMessage): Promise<void>;
-  // The radius-app-bicep skill bootstrap, the same JSON radius_generate_app
+  // The radius-app-model skill bootstrap, the same JSON radius_generate_app
   // returns. Each modeling handoff embeds it, so the agent starts the skill
   // without finding and calling the tool. A rejection abandons the handoff the
   // same way a failed send does.
@@ -178,7 +178,6 @@ export function appModelHandoffKey(
         status.freshness.status,
         status.refreshable ? "local" : "remote",
         origin?.sourceCommit ?? "",
-        origin?.skillVersion ?? "",
         origin?.radiusVersion ?? "",
         origin ? "" : status.freshness.appBicepHash,
         status.freshness.requiresConfirmation ? "confirm" : "auto"
@@ -452,9 +451,9 @@ export function createAppModelHandoff(
         releaseReservation();
         throw error;
       }
-      // The modeling skill cannot author this repository at all. Deliberately
-      // does NOT consume the key: adding a Dockerfile later must make the next
-      // render eligible for the handoff.
+      // The canvas does not model a repository without a Dockerfile.
+      // Deliberately does NOT consume the key: adding a Dockerfile later must
+      // make the next render eligible for the handoff.
       if (!hasModelableSource(sources)) {
         releaseReservation();
         return;

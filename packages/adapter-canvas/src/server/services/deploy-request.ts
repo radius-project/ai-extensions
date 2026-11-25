@@ -2,14 +2,24 @@ import type {
   DeploymentInvocation,
   DeploymentRuntime
 } from "@radius-project/adapter-shared";
-import type {
-  DeploymentState,
-  DeploymentStartInput
+import {
+  APP_ORIGIN_REPO_PATH,
+  parseAppOrigin,
+  stagesBeforeDeploy,
+  type DeploymentState,
+  type DeploymentStartInput,
+  type DeploymentTarget
 } from "@radius-project/core";
 import type { CanvasState } from "../../shared.js";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
 import type { PlannedGraphRecoveryService } from "./deploy-planned-graph.js";
 import type { DeployModelSource } from "./deploy-model-source.js";
+import { hashAppBicep } from "../../app-bicep-hash.js";
+import type { RadiusSkillHandoff } from "../../skill.js";
+import {
+  deployReadinessHandoffMessage,
+  type HandoffMessage
+} from "../../runtime/hooks.js";
 
 export interface DeployRequestInstanceEntry {
   state: CanvasState;
@@ -35,6 +45,10 @@ export interface DeployRequestDependencies {
   ): void;
   errorMessage(error: unknown): string;
   reportError(error: unknown): void;
+  // Starts a modeling skill, and sends its handoff to Copilot. Used when the
+  // model must pass more stages before it can deploy.
+  skillHandoff: RadiusSkillHandoff;
+  sendHandoff(message: HandoffMessage): Promise<void>;
 }
 
 export interface DeployRequestResult {
@@ -53,6 +67,19 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+const APP_MODEL_PATH = ".radius/app.bicep";
+
+function modelNotReadyMessage(
+  stages: ReadonlyArray<"plan" | "complete">,
+  provider: string
+): string {
+  const work =
+    stages.includes("plan") ?
+      `planning it for ${provider} with the radius-app-plan skill and completing it with the radius-app-complete skill`
+    : "completing it with the radius-app-complete skill";
+  return `The application model is not ready to deploy, so nothing was deployed. Copilot is ${work}. Select Deploy again when it finishes.`;
+}
+
 /** HTTP parsing and view subscription only; the shared runtime admits work. */
 export function createDeployRequestService(
   dependencies: DeployRequestDependencies
@@ -63,7 +90,9 @@ export function createDeployRequestService(
     "attach",
     "errorMessage",
     "reportError",
-    "readModelForSelection"
+    "readModelForSelection",
+    "skillHandoff",
+    "sendHandoff"
   ]);
   if (typeof dependencies.runtime?.start !== "function")
     throw new Error("createDeployRequestService requires runtime.");
@@ -71,6 +100,61 @@ export function createDeployRequestService(
     throw new Error(
       "createDeployRequestService requires plannedGraph.recover."
     );
+
+  // The modeling skills write a model in stages, and only a model that passed
+  // Stage 3 for the deploy's provider is ready to deploy. A model that a stage
+  // recorded but that is not complete is not deployed: Copilot is asked to run
+  // the stages it still needs, and the user deploys again afterwards. The check
+  // acts only on an origin record that it can read and that matches the model,
+  // so a hand-written or hand-edited model deploys as before. The runtime runs
+  // it last, on the validated target and the model it selected.
+  async function refuseUnfinishedModel(
+    entry: DeployRequestInstanceEntry,
+    { repo, branch, provider, appFile }: Readonly<DeploymentTarget>
+  ): Promise<{ status: 409 | 503; error: string } | undefined> {
+    if (appFile !== APP_MODEL_PATH) return undefined;
+    const origin = await dependencies.readModelForSelection(
+      entry,
+      repo,
+      branch,
+      APP_ORIGIN_REPO_PATH
+    );
+    if (origin.status !== "available") return undefined;
+    const model = await dependencies.readModelForSelection(
+      entry,
+      repo,
+      branch,
+      APP_MODEL_PATH
+    );
+    if (model.status !== "available") return undefined;
+    const stages = stagesBeforeDeploy(
+      parseAppOrigin(origin.content),
+      hashAppBicep(model.content),
+      provider
+    );
+    if (stages.length === 0) return undefined;
+    try {
+      await dependencies.sendHandoff(
+        deployReadinessHandoffMessage({
+          repo,
+          branch,
+          provider,
+          steps: stages.map((stage) => {
+            const skill =
+              stage === "plan" ? "radius-app-plan" : "radius-app-complete";
+            return { skill, handoff: dependencies.skillHandoff(skill) };
+          })
+        })
+      );
+    } catch (error) {
+      return {
+        status: 503,
+        error: `The application model is not ready to deploy, and Copilot could not be asked to complete it: ${dependencies.errorMessage(error)}`
+      };
+    }
+    return { status: 409, error: modelNotReadyMessage(stages, provider) };
+  }
+
   return {
     async deploy({ instanceId, body }) {
       try {
@@ -152,6 +236,12 @@ export function createDeployRequestService(
                 log
               })
           },
+          ...(!repair ?
+            {
+              checkTarget: (target: Readonly<DeploymentTarget>) =>
+                refuseUnfinishedModel({ state: selectionState }, target)
+            }
+          : {}),
           ...(!repair && !input.appFile ?
             {
               modelSelection: {
