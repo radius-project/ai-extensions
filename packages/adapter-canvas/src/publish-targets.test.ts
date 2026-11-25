@@ -90,6 +90,31 @@ test("resolveRadiusArtifactTarget verifies the nearest existing parent for a new
   }
 });
 
+test("resolves new compiler targets below an in-tree junction to the same writer path", () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "radius-output-alias-"));
+  try {
+    const root = path.join(ws, ".radius");
+    const output = path.join(root, "output");
+    fs.mkdirSync(output, { recursive: true });
+    fs.symlinkSync(output, path.join(root, "alias"), "junction");
+    const canonical = resolveRadiusArtifactTarget(
+      ws,
+      "output/new/types.tgz",
+      null
+    );
+    assert.equal(
+      canonical,
+      path.join(fs.realpathSync(output), "new", "types.tgz")
+    );
+    assert.equal(
+      resolveRadiusArtifactTarget(ws, "alias/new/types.tgz", null),
+      canonical
+    );
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test("radius artifact resolvers reject absolute paths", () => {
   assert.throws(
     () => resolveRadiusArtifactTarget(WS, "/etc/passwd", null),

@@ -159,9 +159,10 @@ function readFile(file) {
 function fingerprintManagedFile(file) {
   let bytes;
   try {
-    bytes = readFileSync(file);
+    const regular = readStableRegularFile(file);
+    if (!regular) return { state: "absent", hash: null };
+    bytes = regular.bytes;
   } catch (error) {
-    if (error.code === "ENOENT") return { state: "absent", hash: null };
     return { state: "unreadable", hash: null, reason: error.message };
   }
   if (TEXT_MANAGED_FILE.test(file)) {
@@ -210,7 +211,7 @@ function requiredStagedFiles(present) {
 // directory". The staging directory is written by an agent, so a note, a scratch
 // file, or a credential dropped there must not be published into the repository
 // and staged in git on the strength of merely being present.
-function isPublishableExtraArtifact(name) {
+export function isPublishableExtraArtifact(name) {
   return (
     name === "custom-recipe-pack.bicep" ||
     /^(?:[a-z0-9-]+|[a-z][A-Za-z0-9]*)-recipe\.bicep$/u.test(name)
@@ -284,43 +285,43 @@ function managedFilesFor(radiusDir) {
 //
 // Returns true when the file was written, so only a rule this run added is
 // staged in git.
-function readStagingIgnoreFile(ignoreFile) {
-  let fd;
-  try {
-    fd = openSync(
-      ignoreFile,
-      constants.O_RDONLY |
-        (constants.O_NOFOLLOW ?? 0) |
-        (constants.O_NONBLOCK ?? 0)
-    );
-  } catch (error) {
-    if (
-      error.code === "ENOENT" &&
-      !lstatSync(ignoreFile, { throwIfNoEntry: false })
-    )
-      return { text: "" };
-    throw error;
-  }
+function readStableRegularFile(file) {
+  const expected = lstatSync(file, { bigint: true, throwIfNoEntry: false });
+  if (!expected) return null;
+  if (!expected.isFile()) fail(`${file} is not a stable regular file.`);
+  const fd = openSync(
+    file,
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (constants.O_NONBLOCK ?? 0)
+  );
   try {
     const opened = fstatSync(fd, { bigint: true });
-    // Windows lacks O_NOFOLLOW. Verify that the open handle identifies the
-    // regular directory entry before reading through that same handle.
-    const entry = lstatSync(ignoreFile, {
+    const entry = lstatSync(file, {
       bigint: true,
       throwIfNoEntry: false
     });
     if (
       !opened.isFile() ||
       !entry?.isFile() ||
+      expected.dev !== opened.dev ||
+      expected.ino !== opened.ino ||
       entry.dev !== opened.dev ||
       entry.ino !== opened.ino
     ) {
-      fail(`${ignoreFile} is not a stable regular file.`);
+      fail(`${file} is not a stable regular file.`);
     }
-    return { text: readFileSync(fd, "utf8"), mode: Number(opened.mode) };
+    return { bytes: readFileSync(fd), mode: Number(opened.mode) };
   } finally {
     closeSync(fd);
   }
+}
+
+function readStagingIgnoreFile(ignoreFile) {
+  const file = readStableRegularFile(ignoreFile);
+  return file ?
+      { text: file.bytes.toString("utf8"), mode: file.mode }
+    : { text: "" };
 }
 
 function ensureStagingIgnored(radiusDir, stagingDir) {
@@ -443,7 +444,10 @@ function begin(radiusDir, dirName) {
 }
 
 // A live runtime holds this handle; run.json is not authorization.
-export function beginManagedRun(workspaceRoot) {
+const hashModelBytes = (bytes) =>
+  createHash("sha256").update(bytes).digest("hex");
+
+export function beginManagedRun(workspaceRoot, observed = []) {
   const root = realpathSync(workspaceRoot);
   const radiusDir = path.join(root, ".radius");
   if (
@@ -452,6 +456,23 @@ export function beginManagedRun(workspaceRoot) {
   ) {
     fail(`Managed modeling requires a real .radius directory in ${root}.`);
   }
+  const observedPaths = new Set([
+    "app.bicep",
+    "app.origin.json",
+    ".radius/app.bicep",
+    ".radius/app.origin.json"
+  ]);
+  function assertObservedBaseline() {
+    for (const { path: relative, hash } of observed) {
+      if (!observedPaths.has(relative))
+        fail("Unexpected managed model baseline path.");
+      const file = readStableRegularFile(path.join(root, relative));
+      if ((file ? hashModelBytes(file.bytes) : null) !== hash) {
+        fail(`Managed model files changed while modeling: ${relative}.`);
+      }
+    }
+  }
+  assertObservedBaseline();
   const { stagingDir, baseline } = begin(
     radiusDir,
     `${MANAGED_RUN_PREFIX}${randomUUID()}`
@@ -472,29 +493,35 @@ export function beginManagedRun(workspaceRoot) {
     }
   }
   let finished = false;
-  let validatedSnapshot;
-  function snapshot() {
-    const entries = readdirSync(stagingDir, { withFileTypes: true });
-    const present = new Set(
-      entries.filter((entry) => entry.isFile()).map((entry) => entry.name)
-    );
+  let validating = false;
+  let validatedCopy;
+  function snapshot(dir) {
+    const present = new Set(readdirSync(dir));
     const files = publishableFiles(present, requiredStagedFiles(present));
-    if (files.some((name) => !present.has(name))) {
-      fail("The managed modeling run has missing or non-regular staged files.");
-    }
+    files.push(STAGING_RUN_RECORD);
+    if (present.has("resolved-types.json")) files.push("resolved-types.json");
+    return files.map((name) => {
+      const file = path.join(dir, name);
+      const entry = readStableRegularFile(file);
+      if (!entry) fail(`The managed modeling run is missing ${file}.`);
+      return [name, entry.bytes];
+    });
+  }
+  function digest(files) {
     return JSON.stringify(
-      files.map((name) => [
-        name,
-        createHash("sha256")
-          .update(readFileSync(path.join(stagingDir, name)))
-          .digest("hex")
-      ])
+      files.map(([name, bytes]) => [name, hashModelBytes(bytes)])
     );
+  }
+  function removeCopy(copy, identity) {
+    if (identity && directoryIdentity(copy) === identity) {
+      rmSync(copy, { recursive: true, force: true });
+    }
   }
   return {
     stagingDir,
     assertBaseline() {
       assertActive();
+      assertObservedBaseline();
       const unreadable = Object.keys(baseline).filter(
         (file) => baseline[file] === "unreadable"
       );
@@ -527,36 +554,110 @@ export function beginManagedRun(workspaceRoot) {
     },
     cancel() {
       finished = true;
+      if (validatedCopy) removeCopy(validatedCopy.dir, validatedCopy.identity);
     },
-    async validate(check) {
+    async validate(check, isExitUnconfirmed) {
       assertActive();
-      validatedSnapshot = undefined;
-      const before = snapshot();
-      await check(path.join(stagingDir, "app.bicep"));
-      assertActive();
-      if (before !== snapshot()) {
-        fail("Staged artifacts changed while Radius was validating them.");
+      if (validating || validatedCopy)
+        fail("This run has already started final validation.");
+      const files = snapshot(stagingDir);
+      const expected = digest(files);
+      const dir = path.join(
+        radiusDir,
+        `${MANAGED_RUN_PREFIX}validation-${randomUUID()}`
+      );
+      mkdirSync(dir, { mode: 0o700 });
+      const identity = directoryIdentity(dir);
+      validating = true;
+      let retain = false;
+      try {
+        writeFileSync(
+          path.join(dir, STAGING_SELF_IGNORE_FILE),
+          STAGING_SELF_IGNORE,
+          { flag: "wx" }
+        );
+        for (const [name, bytes] of files) {
+          writeFileSync(path.join(dir, name), bytes, { flag: "wx" });
+        }
+        await check(path.join(dir, "app.bicep"));
+        assertActive();
+        if (
+          directoryIdentity(dir) !== identity ||
+          digest(snapshot(dir)) !== expected ||
+          digest(snapshot(stagingDir)) !== expected
+        ) {
+          fail("Staged artifacts changed while Radius was validating them.");
+        }
+        const byName = new Map(files);
+        validatedCopy = {
+          dir,
+          identity,
+          expected,
+          committed: {
+            definitionHash: hashModelBytes(byName.get("app.bicep")),
+            originHash: hashModelBytes(byName.get("app.origin.json"))
+          }
+        };
+      } catch (error) {
+        retain = Boolean(isExitUnconfirmed?.(error));
+        if (retain) {
+          throw new Error(
+            `${error.message} Validation cleanup is incomplete; the ignored copy remains at ${dir}.`,
+            { cause: error }
+          );
+        }
+        throw error;
+      } finally {
+        validating = false;
+        if (!retain && !validatedCopy) removeCopy(dir, identity);
       }
-      validatedSnapshot = before;
     },
     async promote(prepareCommit, beforeCommit, options = {}) {
       assertActive();
-      const expectedSnapshot = validatedSnapshot;
-      return publish(radiusDir, stagingDir, {
-        ...options,
-        managedBaseline: baseline,
-        prepareCommit,
-        beforeCommit() {
-          assertActive();
-          beforeCommit();
-          finished = true;
-          if (!expectedSnapshot || expectedSnapshot !== snapshot()) {
-            fail(
-              "Radius cannot promote artifacts that have not passed validation or changed afterward."
-            );
+      const copy = validatedCopy;
+      if (!copy)
+        fail(
+          "Radius cannot promote artifacts that have not passed validation."
+        );
+      validatedCopy = undefined;
+      try {
+        return await publish(radiusDir, copy.dir, {
+          ...options,
+          managedBaseline: baseline,
+          prepareCommit,
+          beforeCommit() {
+            assertActive();
+            beforeCommit();
+            assertObservedBaseline();
+            finished = true;
+            if (
+              directoryIdentity(copy.dir) !== copy.identity ||
+              digest(snapshot(copy.dir)) !== copy.expected ||
+              digest(snapshot(stagingDir)) !== copy.expected
+            ) {
+              fail("Radius cannot promote artifacts that changed afterward.");
+            }
+          },
+          onFilesystemCommitted() {
+            options.onFilesystemCommitted?.(copy.committed);
+            try {
+              removeCopy(stagingDir, stagingIdentity);
+            } catch (error) {
+              console.error(
+                `The model was written, but ${stagingDir} could not be removed (${error.message}).`
+              );
+            }
           }
+        });
+      } finally {
+        try {
+          removeCopy(copy.dir, copy.identity);
+        } catch (error) {
+          console.error(
+            `The ignored validation copy at ${copy.dir} could not be removed (${error.message}).`
+          );
         }
-      });
+      }
     }
   };
 }

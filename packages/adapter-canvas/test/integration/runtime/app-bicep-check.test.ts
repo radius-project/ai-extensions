@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, afterEach, describe, it, test } from "vitest";
+import { beginManagedRun } from "../../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
 import {
   REPAIR_ATTEMPT_BUDGET,
   REPAIR_COMPILE_LIMIT,
@@ -2978,6 +2979,42 @@ function stagedRun(directory: string, repair?: unknown): void {
 }
 
 describe("repair budget", () => {
+  it("runs the shipped managed-final checker against the promotion snapshot", async () => {
+    const workspace = temporaryDirectory();
+    const stage = beginManagedRun(workspace);
+    try {
+      fs.writeFileSync(path.join(stage.stagingDir, "app.bicep"), "");
+      fs.writeFileSync(path.join(stage.stagingDir, "app.origin.json"), "{}");
+      fs.writeFileSync(path.join(stage.stagingDir, "bicepconfig.json"), "{}");
+      const contract = resolvedTypes({});
+      stagedResolvedTypes(stage.stagingDir, contract);
+      await stage.validate(async (app) => {
+        assert.notEqual(path.dirname(app), stage.stagingDir);
+        assert.deepEqual(
+          JSON.parse(
+            fs.readFileSync(
+              path.join(path.dirname(app), RESOLVED_TYPES),
+              "utf8"
+            )
+          ),
+          contract
+        );
+        const env = fakeBicep(path.dirname(app), sarif([]), 0);
+        const result = spawnSync(
+          process.execPath,
+          [checker, app, "--managed-final"],
+          {
+            encoding: "utf8",
+            env: { ...process.env, ...env }
+          }
+        );
+        assert.equal(result.status, 0, result.stderr);
+      });
+    } finally {
+      stage.cancel();
+    }
+  });
+
   it("runs a separate managed completion check without charging the repair budget", () => {
     const directory = path.join(
       temporaryDirectory(),

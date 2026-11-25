@@ -21,6 +21,33 @@ const WORKSPACE = {
 };
 
 describe("observeWorkspaceModelingRun", () => {
+  it.each([true, false])(
+    "counts stage activity only if its owner survives the read (%s)",
+    async (survives) => {
+      let liveStage: string | undefined =
+        "/workspace/.radius/.staging-managed-fixture";
+      const read = vi.fn(async (_path, stage?: string) => {
+        if (!survives) liveStage = undefined;
+        return stage ? 42 : null;
+      });
+      await expect(
+        observeWorkspaceModelingRun(
+          "a/b",
+          ["feat"],
+          WORKSPACE,
+          read,
+          () => liveStage
+        )
+      ).resolves.toBe(survives ? 42 : null);
+      expect(read).toHaveBeenNthCalledWith(
+        1,
+        "/workspace",
+        "/workspace/.radius/.staging-managed-fixture"
+      );
+      if (!survives) expect(read).toHaveBeenNthCalledWith(2, "/workspace");
+    }
+  );
+
   it("probes workspace staging activity when the repository and one requested branch match", async () => {
     const probe = vi.fn(async () => 42);
 

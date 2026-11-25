@@ -75,7 +75,6 @@ import { createProductionDeploymentRuntime } from "./runtime/production-deployme
 import { createDeployModelSource } from "./server/services/deploy-model-source.js";
 import {
   getSourceRefResources,
-  prepareSourceRefResources,
   setSourceRefResources,
   updateSourceRefs
 } from "./source-refs.js";
@@ -168,7 +167,9 @@ const {
   getOrCreateServer,
   stopServer,
   getLastWebviewActivityAt,
-  environmentServices
+  environmentServices,
+  prepareGraphSelection,
+  setAuthoringLifecycle
 } = createProductionCanvasServerRuntime({
   executionOwner,
   accountContext,
@@ -249,7 +250,7 @@ const dependencies: RadiusExtensionDependencies = {
   },
   sourceRefs: {
     getSourceRefResources,
-    prepareSourceRefResources,
+    prepareSourceRefResources: prepareGraphSelection,
     setSourceRefResources,
     updateSourceRefs
   },
@@ -261,6 +262,7 @@ const dependencies: RadiusExtensionDependencies = {
   },
   hostCallbacks: {
     setAppBicepHandoff,
+    setAuthoringLifecycle,
     setDeployRepairHandoff: deploymentRuntime.setDeployRepairHandoff,
     setDeployFailureNotice: deploymentRuntime.setDeployFailureNotice,
     setSessionPromptHandler,

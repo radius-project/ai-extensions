@@ -69,13 +69,15 @@ export interface ModelingActivity {
   ): Promise<boolean>;
 }
 
-export function observeWorkspaceModelingRun(
+export async function observeWorkspaceModelingRun(
   repo: string,
   branches: ReadonlyArray<string>,
   workspace: ModelingWorkspace,
   modelingRunLastActivityAtMs: (
-    workspacePath: string | null | undefined
-  ) => Promise<number | null>
+    workspacePath: string | null | undefined,
+    managedStage?: string
+  ) => Promise<number | null>,
+  liveStage?: (workspacePath: string | null | undefined) => string | undefined
 ): Promise<number | null> {
   if (
     !repo ||
@@ -83,9 +85,14 @@ export function observeWorkspaceModelingRun(
     workspace.repo !== repo ||
     !branches.some((branch) => branch === workspace.branch)
   ) {
-    return Promise.resolve(null);
+    return null;
   }
-  return modelingRunLastActivityAtMs(workspace.path);
+  const stage = liveStage?.(workspace.path);
+  if (!stage) return modelingRunLastActivityAtMs(workspace.path);
+  const activity = await modelingRunLastActivityAtMs(workspace.path, stage);
+  return liveStage?.(workspace.path) === stage ?
+      activity
+    : modelingRunLastActivityAtMs(workspace.path);
 }
 
 // Bounds the announcement map. One entry per repo+branch modeled in this

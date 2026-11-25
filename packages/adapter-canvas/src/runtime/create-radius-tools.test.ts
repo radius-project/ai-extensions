@@ -17,7 +17,7 @@ import { createDeferred } from "../../test/support/browser/fakes.js";
 import { createModelAuthoringOwner } from "./model-authoring-owner.js";
 
 function findTool(
-  tools: ReturnType<typeof createRadiusTools>,
+  tools: ReturnType<typeof createRadiusTools>["tools"],
   name: string
 ): { handler: (args: Record<string, unknown>) => Promise<any> } {
   const tool = tools.find((t) => t.name === name);
@@ -42,7 +42,7 @@ function setup(options?: Parameters<typeof createFakeDependencies>[0]) {
     staging: fake.deps.beginManagedModel,
     resolveTarget: async () => null
   });
-  const tools = createRadiusTools(
+  const { tools } = createRadiusTools(
     fake.deps,
     modelingActivity,
     missingModelHandoffs,
@@ -1010,6 +1010,50 @@ describe("TL-11: radius_report_modeling_failure", () => {
     expect(entry.state.appModelFailures).toBeUndefined();
   });
 
+  it("returns the existing failure without rereading an edited worktree", async () => {
+    const { tools, entry, deps } = await currentAttempt();
+    const revision = vi.mocked(deps.appModel.workspaceSourceRevision);
+    revision
+      .mockResolvedValueOnce("original-source")
+      .mockResolvedValue("edited-source");
+    const tool = findTool(tools, "radius_report_modeling_failure");
+    await expect(tool.handler(report)).resolves.toEqual({ recorded: true });
+    const recorded = entry.state.appModelFailures?.["acme/widgets::main"];
+    const reads = vi.mocked(deps.graphSources.read).mock.calls.length;
+    await expect(
+      tool.handler({ ...report, error: "different diagnostic" })
+    ).resolves.toEqual({ recorded: true });
+    expect(vi.mocked(deps.graphSources.read)).toHaveBeenCalledTimes(reads);
+    expect(revision).toHaveBeenCalledOnce();
+    expect(entry.state.appModelFailures?.["acme/widgets::main"]).toBe(recorded);
+    expect(recorded).toMatchObject({ sourceRevision: "original-source" });
+  });
+
+  it("preserves the first recorded failure when another report is still reading source", async () => {
+    const { tools, entry, deps } = await currentAttempt();
+    const started = createDeferred<void>();
+    const finish = createDeferred<string>();
+    vi.mocked(deps.appModel.workspaceSourceRevision)
+      .mockImplementationOnce(() => {
+        started.resolve();
+        return finish.promise;
+      })
+      .mockResolvedValueOnce("original-source");
+    const tool = findTool(tools, "radius_report_modeling_failure");
+    const pending = tool.handler({ ...report, error: "late diagnostic" });
+    await started.promise;
+    await expect(tool.handler(report)).resolves.toEqual({ recorded: true });
+    const recorded = entry.state.appModelFailures?.["acme/widgets::main"];
+    finish.resolve("edited-source");
+
+    await expect(pending).resolves.toEqual({ recorded: true });
+    expect(entry.state.appModelFailures?.["acme/widgets::main"]).toBe(recorded);
+    expect(recorded).toMatchObject({
+      error: report.error,
+      sourceRevision: "original-source"
+    });
+  });
+
   it("rejects a stale failure when the application model now exists", async () => {
     const { tools, entry } = await currentAttempt({
       bicepByRepoBranch: {
@@ -1018,7 +1062,7 @@ describe("TL-11: radius_report_modeling_failure", () => {
     });
     entry.state.appModelFailures = {
       "acme/widgets::main": {
-        attemptToken: "attempt-1",
+        attemptToken: "previous-attempt",
         error: "older failure"
       }
     };
@@ -1030,7 +1074,9 @@ describe("TL-11: radius_report_modeling_failure", () => {
 
     expect(result).toMatchObject({ recorded: false });
     expect(entry.state.appModelFailures).toEqual({});
-    expect(entry.state.appModelAttemptTokens).toEqual({});
+    expect(entry.state.appModelAttemptTokens).toEqual({
+      "acme/widgets::main": "attempt-1"
+    });
   });
 });
 

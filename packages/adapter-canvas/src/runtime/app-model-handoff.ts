@@ -38,6 +38,7 @@ import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.j
 import { missingModelHandoffTarget } from "./missing-model-handoff-claims.js";
 import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../graph-progress-contract.js";
 import { appModelTargetKey } from "../app-model-authoring-failure.js";
+import type { CommittedModelIdentity } from "../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
 import { errorMessage } from "./util.js";
 import {
   readCanvasAuthoringBootstrap,
@@ -66,6 +67,11 @@ export interface AppModelHandoffRequest {
 export interface AppModelHandoffDependencies {
   beginManaged: ReturnType<typeof createCanvasModelAuthoring>["begin"];
   cancelManaged(token: string): void;
+  currentManaged(
+    repo: string,
+    branches: readonly string[],
+    workspace: string | null | undefined
+  ): { token: string; mode: "missing" | "refresh"; branch: string } | undefined;
   // Branch context to read against when no panel state was supplied. Without it
   // the workspace repository would be judged from its remote instead of the
   // worktree the canvas actually renders.
@@ -76,6 +82,7 @@ export interface AppModelHandoffDependencies {
     state: CanvasState
   ): Promise<AppModelStatus>;
   assertWorkspaceSource(source: AppModelStatus["source"]): Promise<void>;
+  isCurrentManagedWorkspace(source: AppModelStatus["source"]): Promise<boolean>;
   authorizeMissingModel(
     page: string,
     state: CanvasState | undefined,
@@ -185,7 +192,10 @@ export function createAppModelHandoff(
 ): AppModelHandoff {
   const targetKey = missingModelHandoffTarget;
   const panelReservations = new WeakMap<CanvasState, Map<string, symbol>>();
-  const promotedRevisions = new Map<string, { revision: string }>();
+  const promotedRevisions = new Map<
+    string,
+    { revision: string; identity: CommittedModelIdentity }
+  >();
   const nodeNotices = new Map<string, symbol>();
   const promotionKey = (workspace: string, repo: string, branch: string) =>
     JSON.stringify([workspace, repo, branch]);
@@ -225,9 +235,13 @@ export function createAppModelHandoff(
     }
   }
 
-  function rememberPromotion(target: string, revision: string): void {
+  function rememberPromotion(
+    target: string,
+    revision: string,
+    identity: CommittedModelIdentity
+  ): void {
     promotedRevisions.delete(target);
-    promotedRevisions.set(target, { revision });
+    promotedRevisions.set(target, { revision, identity });
     if (promotedRevisions.size > 100) {
       const oldest = promotedRevisions.keys().next().value;
       if (oldest !== undefined) promotedRevisions.delete(oldest);
@@ -283,12 +297,19 @@ export function createAppModelHandoff(
     environmentKey
   }: AppModelHandoffRequest): Promise<void> {
     if (!repo) return;
-    const stillCurrent = (): boolean => isCurrent === undefined || isCurrent();
     const targets = branches.filter((branch): branch is string =>
       Boolean(branch)
     );
     if (!targets.length) return;
     const context = state ? { ...state } : await deps.resolveContext();
+    const stillCurrent = (): boolean =>
+      (!state ||
+        (state.workspacePath === context.workspacePath &&
+          state.workspaceRepo === context.workspaceRepo &&
+          state.workspaceBranch === context.workspaceBranch)) &&
+      (!isCurrent || isCurrent());
+    const currentManaged = () =>
+      deps.currentManaged(repo, targets, context.workspacePath);
     const modelProgressView =
       progressView ?? (page === "graph-diff" ? "diff" : "graph");
     // The app.bicep wait is measured from when the model was first found
@@ -309,6 +330,7 @@ export function createAppModelHandoff(
     // this read later reports a model, releasing that token cannot erase a
     // newer missing-model owner that started while the read was in flight.
     const observedClaim = deps.missingModelHandoffs.current(target);
+    const observedManaged = currentManaged();
 
     // Unavailable workspace evidence abandons the handoff rather than allowing
     // regeneration from a partially resolved model or a changed checkout.
@@ -334,6 +356,21 @@ export function createAppModelHandoff(
     }
     const statuses = await resolveStatuses();
     if (!statuses || !stillCurrent()) return;
+    const needsAuthoring = appAuthoringRequired(statuses);
+    if (
+      !needsAuthoring &&
+      observedManaged?.mode === "missing" &&
+      statuses.some(
+        ({ branch, source, freshness }) =>
+          branch === observedManaged.branch &&
+          source.kind === "workspace" &&
+          source.workspacePath === context.workspacePath &&
+          freshness.status !== "missing"
+      ) &&
+      currentManaged()?.token === observedManaged.token
+    ) {
+      deps.cancelManaged(observedManaged.token);
+    }
     const key = appModelHandoffKey(repo, targets, statuses);
     if (state?.appBicepHandoffKeys?.[target] === key) return;
 
@@ -382,8 +419,9 @@ export function createAppModelHandoff(
       }
     }
 
-    if (appAuthoringRequired(statuses)) {
+    if (needsAuthoring) {
       deps.authorizeMissingModel(page, state, statuses);
+      if (currentManaged()) return;
       // Claim extension-wide before consuming the per-panel reservation. A
       // reopened panel that loses this claim must remain free to retry if the
       // owner later abandons delivery.
@@ -487,11 +525,25 @@ export function createAppModelHandoff(
       let currentSources;
       try {
         currentSources = await sourcesStillCurrent(settled);
+        if (
+          currentSources &&
+          state?.canvasInstanceId &&
+          settled[0].source.kind === "workspace"
+        ) {
+          currentSources = await deps.isCurrentManagedWorkspace(
+            settled[0].source
+          );
+        }
       } catch (error) {
         releaseReservation();
         throw error;
       }
-      if (!currentSources || !stillCurrent() || !ownsReservation()) {
+      if (
+        !currentSources ||
+        !stillCurrent() ||
+        !ownsReservation() ||
+        currentManaged()
+      ) {
         releaseReservation();
         return;
       }
@@ -528,7 +580,10 @@ export function createAppModelHandoff(
       }
       let retired = false;
       let releaseAnnouncement: (() => void) | undefined;
-      const retire = (promoted = false): void => {
+      const retire = (
+        promoted = false,
+        identity?: CommittedModelIdentity
+      ): void => {
         if (retired) return;
         retired = true;
         const source = settled[0]?.source;
@@ -537,11 +592,13 @@ export function createAppModelHandoff(
           promoted &&
           source?.kind === "workspace" &&
           source.workspacePath &&
-          revision
+          revision &&
+          identity
         ) {
           rememberPromotion(
             promotionKey(source.workspacePath, repo, source.ref),
-            revision
+            revision,
+            identity
           );
         }
         if (attemptToken) clearAttempt(attemptToken);
@@ -578,7 +635,8 @@ export function createAppModelHandoff(
             sourceRevisions[0],
             skillHandoff,
             stillCurrent,
-            retire
+            retire,
+            "missing"
           );
         }
         await deps.send(
@@ -639,6 +697,10 @@ export function createAppModelHandoff(
     const comparison = page === "graph-diff" || targets.length > 1;
     const refresh = comparison ? undefined : findAppModelRefresh(present);
     if (refresh) {
+      if (currentManaged()) {
+        releaseStateReservation();
+        return;
+      }
       const { model } = refresh;
       const refreshKey = refreshRequestKey(model);
       let releaseMemo: (() => void) | undefined;
@@ -656,6 +718,7 @@ export function createAppModelHandoff(
           !(await sourcesStillCurrent([model])) ||
           !stillCurrent() ||
           !ownsStateReservation() ||
+          currentManaged() ||
           !(releaseMemo = deps.claimRefreshMemo(refreshKey))
         ) {
           releaseStateReservation();
@@ -712,7 +775,11 @@ export function createAppModelHandoff(
               const latestPromotion = promotedRevisions.get(promotionTarget);
               if (
                 model.freshness.status === "source-changed" &&
-                latestPromotion?.revision === revision
+                latestPromotion?.revision === revision &&
+                latest.identity?.definitionHash ===
+                  latestPromotion.identity.definitionHash &&
+                latest.identity.originHash ===
+                  latestPromotion.identity.originHash
               ) {
                 releaseRefresh();
                 return;
@@ -746,11 +813,13 @@ export function createAppModelHandoff(
               revision,
               skillHandoff,
               stillCurrent,
-              (promoted) => {
-                if (promoted && promotionTarget)
-                  rememberPromotion(promotionTarget, revision);
+              (promoted, identity) => {
+                if (promoted && promotionTarget && identity)
+                  rememberPromotion(promotionTarget, revision, identity);
                 releaseRefresh();
-              }
+              },
+              "refresh",
+              latest.observedFiles
             );
           }
           await deps.send(appModelRefreshMessage(model, skillHandoff));

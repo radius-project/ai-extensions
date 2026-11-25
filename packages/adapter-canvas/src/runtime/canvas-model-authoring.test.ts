@@ -5,6 +5,10 @@ import { spawnRad } from "@radius-project/adapter-shared";
 import { describe, expect, it, vi } from "vitest";
 import { createFakeDependencies } from "../../test/support/runtime/fakes.js";
 import type { CanvasState } from "../shared.js";
+import {
+  captureSourceRefSelection,
+  prepareSourceRefResources
+} from "../source-refs.js";
 import { createCanvasModelAuthoring } from "./canvas-model-authoring.js";
 
 const REPO = "octo/app";
@@ -79,6 +83,27 @@ async function fixture(workspacePath = WORKSPACE) {
 }
 
 describe("createCanvasModelAuthoring", () => {
+  it("keeps the owner across a reload but retires it before an A-to-B-to-A return", async () => {
+    const h = await fixture();
+    const original = { repo: REPO, branch: BRANCH };
+    prepareSourceRefResources(h.entry, "graph", original);
+    h.begin(BOOTSTRAP, captureSourceRefSelection(h.entry.state, "graph"));
+    prepareSourceRefResources(h.entry, "graph", original);
+    h.authoring.selectionChanged(h.entry.state);
+    expect(h.cancel).not.toHaveBeenCalled();
+
+    prepareSourceRefResources(h.entry, "graph", {
+      repo: REPO,
+      branch: "other"
+    });
+    h.authoring.selectionChanged(h.entry.state);
+    prepareSourceRefResources(h.entry, "graph", original);
+    h.authoring.selectionChanged(h.entry.state);
+    expect(h.settled).toHaveBeenCalledExactlyOnceWith(false);
+    await expect(h.authoring.owner.finish(TOKEN)).rejects.toThrow("expired");
+    expect(h.cancel).toHaveBeenCalledOnce();
+  });
+
   it("reports diagnostics from a real validator process without promoting", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "radius-validator-"));
     try {

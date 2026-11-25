@@ -173,6 +173,14 @@ export interface PublishTargetsDependencies {
 }
 
 export interface HostCallbackDependencies {
+  setAuthoringLifecycle(lifecycle: {
+    liveStage(
+      state: CanvasState,
+      repo: string,
+      branches: readonly string[]
+    ): string | undefined;
+    selectionChanged(state: CanvasState): void;
+  }): void;
   setAppBicepHandoff(
     fn: (input: {
       repo: string;
@@ -287,7 +295,8 @@ export interface AppModelDependencies {
   // it publishes or aborts. Consumers must apply an inactivity limit because
   // an interrupted run can leave its staging directory behind.
   modelingRunLastActivityAtMs(
-    workspacePath: string | null | undefined
+    workspacePath: string | null | undefined,
+    liveManagedStage?: string
   ): Promise<number | null>;
   // Repo-relative file read from the local worktree, when the selection is it.
   fetchWorkspaceFile(

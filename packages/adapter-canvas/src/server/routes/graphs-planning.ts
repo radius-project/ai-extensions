@@ -51,6 +51,10 @@ import type {
   WorkspaceBranchResolution
 } from "../../workspace.js";
 import {
+  isWorkspaceSelection,
+  READ_ONLY_MODEL_SELECTION
+} from "../../workspace.js";
+import {
   inspectDeploymentGraph,
   projectInspectedTopology,
   type DeploymentInspectionReader
@@ -980,11 +984,19 @@ export async function handleLoadGraphStream(
         isCurrentSelection
       );
     } else {
+      if (!isWorkspaceSelection(entry.state, repo, branch)) {
+        sendDone({ error: READ_ONLY_MODEL_SELECTION, repo, branch });
+        return;
+      }
       const source = evaluateAppSource(
         await dependencies.listBranchPaths(entry, repo, branch)
       );
-      if (!isCurrent()) {
+      if (!isCurrent() || !isCurrentSelection()) {
         sendDone({ stale: true });
+        return;
+      }
+      if (!isWorkspaceSelection(entry.state, repo, branch)) {
+        sendDone({ error: READ_ONLY_MODEL_SELECTION, repo, branch });
         return;
       }
       if (source.status === "none") {

@@ -23,7 +23,10 @@ import {
   createMissingModelHandoffClaims,
   MISSING_MODEL_HANDOFF_CLAIM_TTL_MS
 } from "./missing-model-handoff-claims.js";
-import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../graph-progress-contract.js";
+import {
+  GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
+  GRAPH_APP_BICEP_MAX_WAIT_MS
+} from "../graph-progress-contract.js";
 import { createModelingActivity } from "./modeling-activity.js";
 import { createDeferred } from "../../test/support/browser/fakes.js";
 
@@ -53,6 +56,7 @@ function modelStatus(
       workspacePath: "/workspace"
     },
     refreshable: overrides.refreshable ?? true,
+    identity: outputIdentity(overrides.sourceCommit),
     freshness: {
       status,
       stale:
@@ -75,6 +79,13 @@ function modelStatus(
             appBicepHash: "sha256:abc"
           }
     }
+  };
+}
+
+function outputIdentity(commit?: string) {
+  return {
+    definitionHash: "fixture-definition",
+    originHash: commit ?? "fixture-origin"
   };
 }
 
@@ -144,9 +155,11 @@ function harness(
       (_state, _repo, _branch, _token, _revision, handoff) => handoff
     ),
     cancelManaged: vi.fn(),
+    currentManaged: vi.fn(() => undefined),
     resolveContext,
     resolveStatus,
     assertWorkspaceSource: vi.fn(async () => {}),
+    isCurrentManagedWorkspace: vi.fn(async () => true),
     authorizeMissingModel: vi.fn(),
     evaluateSource,
     modelingInFlight,
@@ -406,7 +419,7 @@ describe("createAppModelHandoff", () => {
     });
     const request = { repo: "a/b", branches: ["main"], page: "graph" };
     await handOff({ ...request, state: { canvasInstanceId: "original" } });
-    beginManaged.mock.calls[0][7]?.(true);
+    beginManaged.mock.calls[0][7]?.(true, outputIdentity("promoted-head"));
 
     origin = "promoted-head";
     const reopened = { canvasInstanceId: "reopened" };
@@ -430,6 +443,169 @@ describe("createAppModelHandoff", () => {
     expect(sent).toHaveLength(4);
   });
 
+  it("keeps a live missing-model owner after the claim and activity windows expire", async () => {
+    let active: ReturnType<AppModelHandoffDependencies["currentManaged"]>;
+    const beginManaged = vi.fn<AppModelHandoffDependencies["beginManaged"]>(
+      (_state, _repo, _branch, token, _revision, handoff) => {
+        active = { token, mode: "missing", branch: "main" };
+        return handoff;
+      }
+    );
+    const { handOff, sent, advance } = harness({
+      beginManaged,
+      statuses: { main: modelStatus("a/b", "main", { status: "missing" }) },
+      currentManaged: () => active
+    });
+
+    const request = {
+      repo: "a/b",
+      branches: ["main"],
+      page: "graph",
+      state: { canvasInstanceId: "model-panel", workspacePath: "/workspace" }
+    };
+    await handOff(request);
+    advance(GRAPH_APP_BICEP_MAX_WAIT_MS + MISSING_MODEL_HANDOFF_CLAIM_TTL_MS);
+    await handOff(request);
+    expect(beginManaged).toHaveBeenCalledOnce();
+    expect(sent).toHaveLength(1);
+    active = undefined;
+    await handOff(request);
+    expect(sent).toHaveLength(2);
+  });
+
+  it("does not stage into a different checkout after the saved revision read", async () => {
+    const reading = createDeferred<void>();
+    const revision = createDeferred<string>();
+    const state = {
+      canvasInstanceId: "model-panel",
+      workspacePath: "/checkout-a",
+      workspaceRepo: "a/b",
+      workspaceBranch: "main"
+    };
+    const beginManaged = vi.fn<AppModelHandoffDependencies["beginManaged"]>(
+      (_state, _repo, _branch, _token, _revision, handoff) => handoff
+    );
+    const { handOff, sent } = harness({
+      beginManaged,
+      statuses: { main: modelStatus("a/b", "main", { status: "missing" }) },
+      readSourceRevision: vi
+        .fn(async () => "source-b")
+        .mockImplementationOnce(() => {
+          reading.resolve();
+          return revision.promise;
+        })
+    });
+
+    const request = { repo: "a/b", branches: ["main"], page: "graph", state };
+    const first = handOff(request);
+    await reading.promise;
+    state.workspacePath = "/checkout-b";
+    revision.resolve("source-a");
+    await first;
+    expect(beginManaged).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(0);
+    await handOff(request);
+    expect(beginManaged).toHaveBeenCalledOnce();
+    expect(beginManaged.mock.calls[0][4]).toBe("source-b");
+  });
+
+  it("retires the observed missing-model attempt only when its worktree model exists", async () => {
+    const active = {
+      token: "original",
+      branch: "main",
+      mode: "missing" as const
+    };
+    let mainExists = false;
+    const retire = vi.fn();
+    const state = {
+      canvasInstanceId: "model-panel",
+      workspacePath: "/workspace"
+    };
+    const { handOff } = harness({
+      currentManaged: () => active,
+      resolveContext: async () => ({
+        ...state,
+        workspaceRepo: "a/b",
+        workspaceBranch: "main"
+      }),
+      cancelManaged: retire,
+      resolveStatus: async (repo, branch) =>
+        modelStatus(repo, branch, {
+          status: branch === "main" && !mainExists ? "missing" : "up-to-date"
+        })
+    });
+    await handOff({
+      repo: "a/b",
+      branches: ["main", "other"],
+      page: "graph-diff",
+      state
+    });
+    expect(retire).not.toHaveBeenCalled();
+    mainExists = true;
+    await handOff({ repo: "a/b", branches: ["main"], page: "graph", state });
+    expect(retire).toHaveBeenCalledExactlyOnceWith("original");
+  });
+
+  it("refreshes a restored older origin at the same saved source revision", async () => {
+    let origin = "old";
+    const beginManaged = vi.fn<AppModelHandoffDependencies["beginManaged"]>(
+      (_state, _repo, _branch, _token, _revision, handoff) => handoff
+    );
+    const { handOff, sent } = harness({
+      beginManaged,
+      resolveStatus: async (repo, branch) =>
+        modelStatus(repo, branch, {
+          status: "source-changed",
+          sourceCommit: origin
+        })
+    });
+
+    const poll = () =>
+      handOff({
+        repo: "a/b",
+        branches: ["main"],
+        page: "graph",
+        state: { canvasInstanceId: "model-panel" }
+      });
+    await poll();
+    beginManaged.mock.calls[0][7]?.(true, outputIdentity("new"));
+    origin = "new";
+    await poll();
+    expect(sent).toHaveLength(1);
+    origin = "old";
+    await poll();
+    expect(sent).toHaveLength(2);
+  });
+
+  it("does not replace a live refresh when another panel reads a stale model", async () => {
+    const active = {
+      token: "original",
+      branch: "main",
+      mode: "refresh" as const
+    };
+    const cancelManaged = vi.fn();
+    const { handOff, sent } = harness({
+      currentManaged: () => active,
+      cancelManaged,
+      statuses: {
+        main: modelStatus("a/b", "main", { status: "source-changed" })
+      }
+    });
+
+    await handOff({
+      repo: "a/b",
+      branches: ["main"],
+      page: "graph",
+      state: {
+        canvasInstanceId: "another-panel",
+        workspacePath: "/workspace"
+      }
+    });
+
+    expect(cancelManaged).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(0);
+  });
+
   it("releases the oldest promoted revision so that branch can refresh again", async () => {
     const beginManaged = vi.fn<AppModelHandoffDependencies["beginManaged"]>(
       (_state, _repo, _branch, _token, _revision, handoff) => handoff
@@ -449,7 +625,7 @@ describe("createAppModelHandoff", () => {
 
     for (let index = 0; index <= 100; index++) {
       await poll(index);
-      beginManaged.mock.calls[index][7]?.(true);
+      beginManaged.mock.calls[index][7]?.(true, outputIdentity());
     }
 
     await poll(100);
@@ -586,7 +762,7 @@ describe("createAppModelHandoff", () => {
     const request = { repo: "a/b", branches: ["main"], page: "graph", state };
 
     await handOff(request);
-    beginManaged.mock.calls[0][7]?.(true);
+    beginManaged.mock.calls[0][7]?.(true, outputIdentity());
     status = "source-changed";
     await handOff(request);
 
@@ -627,12 +803,12 @@ describe("createAppModelHandoff", () => {
         state: { canvasInstanceId }
       });
     await run("original");
-    beginManaged.mock.calls[0][7]?.(true);
+    beginManaged.mock.calls[0][7]?.(true, outputIdentity("original"));
 
     const earlier = run("earlier");
     await reading.promise;
     await run("newest");
-    beginManaged.mock.calls[1][7]?.(true);
+    beginManaged.mock.calls[1][7]?.(true, outputIdentity("newest"));
 
     earlierRevision.resolve("workspace:earlier");
     await earlier;

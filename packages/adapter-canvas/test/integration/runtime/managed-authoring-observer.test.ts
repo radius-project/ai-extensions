@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { beginManagedRun } from "../../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
 import { modelingRunLastActivityAtMs } from "../../../src/workspace.js";
+import { GRAPH_APP_BICEP_MAX_WAIT_MS } from "../../../src/graph-progress-contract.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
 
 describe("managed authoring retry with real staging activity", () => {
@@ -14,6 +15,7 @@ describe("managed authoring retry with real staging activity", () => {
     const repo = "acme/widgets";
     const branch = "main";
     const stages: string[] = [];
+    let now = Date.now();
     let harness:
       Awaited<ReturnType<typeof createRuntimeSdkHarness>> | undefined;
     try {
@@ -23,6 +25,7 @@ describe("managed authoring retry with real staging activity", () => {
           workspaceTreeByRepoBranch: { [`${repo}@${branch}`]: ["Dockerfile"] }
         },
         (deps) => {
+          deps.clock.now = () => now;
           deps.appModel.workspaceSourceRevision = async () => "saved-source";
           deps.appModel.modelingRunLastActivityAtMs =
             modelingRunLastActivityAtMs;
@@ -48,10 +51,11 @@ describe("managed authoring retry with real staging activity", () => {
         workspaceBranch: branch
       });
       const handoff = capturedHostCallbacks.appBicepHandoff;
+      const lifecycle = capturedHostCallbacks.authoringLifecycle;
       const complete = extension.tools.find(
         ({ name }) => name === "radius_complete_app_authoring"
       );
-      if (!handoff || !complete)
+      if (!handoff || !complete || !lifecycle)
         throw new Error("Missing registered authoring");
       const request = { repo, branches: [branch], page: "graph", state };
 
@@ -60,9 +64,19 @@ describe("managed authoring retry with real staging activity", () => {
       const token = state.appModelAttemptTokens?.[`${repo}::${branch}`];
       expect(token).toBeTruthy();
       await writeFile(join(stages[0], "app.bicep"), "// staged model\n");
+      expect(lifecycle.liveStage(state, repo, [branch])).toBe(stages[0]);
+      expect(
+        await modelingRunLastActivityAtMs(workspace, stages[0])
+      ).not.toBeNull();
+      now += GRAPH_APP_BICEP_MAX_WAIT_MS * 2;
+      await handoff(request);
+      expect(stages).toHaveLength(1);
+      expect(state.appModelAttemptTokens?.[`${repo}::${branch}`]).toBe(token);
       await expect(
         complete.handler({ requestToken: token, outcome: "cancel" })
       ).resolves.toEqual({ kind: "cancelled" });
+      expect(lifecycle.liveStage(state, repo, [branch])).toBeUndefined();
+      expect(await modelingRunLastActivityAtMs(workspace)).toBeNull();
 
       await handoff(request);
       expect(stages).toHaveLength(2);

@@ -5,6 +5,10 @@ import type { CanvasState } from "../shared.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import { createModelAuthoringOwner } from "./model-authoring-owner.js";
 import { errorMessage } from "./util.js";
+import type {
+  CommittedModelIdentity,
+  ObservedModelFile
+} from "../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
 
 export function readCanvasAuthoringBootstrap(skillHandoff: string) {
   const handoff: unknown = JSON.parse(skillHandoff);
@@ -67,6 +71,9 @@ export function createCanvasModelAuthoring(
 
   return {
     owner,
+    selectionChanged(state: CanvasState): void {
+      for (const token of panels.get(state) ?? []) owner.retireStale(token);
+    },
     openPanel(state: CanvasState): void {
       if (panels.get(state) === null) panels.set(state, new Set());
     },
@@ -75,7 +82,7 @@ export function createCanvasModelAuthoring(
       panels.set(state, null);
       for (const token of active ?? []) {
         try {
-          owner.cancel(token);
+          owner.retire(token);
         } catch (error) {
           deps.logError(
             `Could not cancel Radius canvas authoring: ${redactCredentials(errorMessage(error))}`
@@ -95,7 +102,9 @@ export function createCanvasModelAuthoring(
       revision: string | undefined,
       skillHandoff: string,
       selectionIsCurrent: () => boolean,
-      settled?: (promoted: boolean) => void
+      settled?: (promoted: boolean, identity?: CommittedModelIdentity) => void,
+      mode?: "missing" | "refresh",
+      observed?: readonly ObservedModelFile[]
     ): string {
       const instanceId = state.canvasInstanceId;
       const workspace = state.workspacePath;
@@ -159,10 +168,13 @@ export function createCanvasModelAuthoring(
             );
           }
         },
-        (promoted) => {
+        (promoted, identity) => {
           active.delete(token);
-          settled?.(promoted);
-        }
+          if (identity) settled?.(promoted, identity);
+          else settled?.(promoted);
+        },
+        mode,
+        observed
       );
       active.add(token);
       return JSON.stringify({

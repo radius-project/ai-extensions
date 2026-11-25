@@ -28,6 +28,7 @@ export interface AppPublicationPorts {
 export function createAppPublication(ports: AppPublicationPorts) {
   const publications = new Map<string, Promise<unknown>>();
   const blockedTargets = new Set<string>();
+  let closed = false;
 
   async function publishInOrder<T>(
     key: string,
@@ -39,9 +40,10 @@ export function createAppPublication(ports: AppPublicationPorts) {
     const publication = Promise.resolve(preceding)
       .catch(() => undefined)
       .then(async () => {
+        if (closed) throw new Error("Radius publication is shutting down.");
         if (blockedTargets.has(key)) {
           throw new Error(
-            "Publication to this target is blocked because the previous Windows process tree could not be confirmed stopped."
+            "Publication to this target is blocked because the previous process tree could not be confirmed stopped."
           );
         }
         try {
@@ -61,9 +63,22 @@ export function createAppPublication(ports: AppPublicationPorts) {
 
   const extensionKey = (target: string) =>
     `extension:${ports.localTargetKey(target)}`;
-  const recipeKey = (target: string) => `recipe:${target.trim().toLowerCase()}`;
+  const recipeKey = (target: string) => {
+    const reference = target.trim();
+    const tag = reference.lastIndexOf(":");
+    const split =
+      tag > reference.lastIndexOf("/") && reference.includes("/") ?
+        tag
+      : reference.length;
+    return `recipe:${reference.slice(0, split).toLowerCase()}${reference.slice(split)}`;
+  };
 
   return {
+    async close() {
+      closed = true;
+      await Promise.allSettled(publications.values());
+      return blockedTargets.size === 0;
+    },
     enqueue: publishInOrder,
     extensionKey,
     recipeKey,
@@ -93,14 +108,19 @@ export function createAppPublication(ports: AppPublicationPorts) {
       return { kind: "compiled", target } as const;
     },
     async publishRecipe(
-      workspace: WorkspacePath,
-      repo: string | null | undefined,
+      resolveWorkspace: () => Promise<{
+        workspacePath?: WorkspacePath;
+        workspaceRepo?: WorkspacePath;
+      }>,
       input: { file?: unknown; target?: unknown }
     ) {
-      const error = ports.validateRegistryTarget(input.target, repo);
-      if (error) return { kind: "refused", error } as const;
-      const target = String(input.target).trim();
+      const { target: requestedTarget } = input;
+      const target = String(requestedTarget || "").trim();
       return publishInOrder(recipeKey(target), async () => {
+        const { workspacePath: workspace, workspaceRepo: repo } =
+          await resolveWorkspace();
+        const error = ports.validateRegistryTarget(requestedTarget, repo);
+        if (error) return { kind: "refused", error } as const;
         const file = ports.resolveExisting(workspace, input.file, null);
         if (!ports.exists(file))
           return { kind: "missing", path: file } as const;

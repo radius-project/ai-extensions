@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -170,6 +171,135 @@ function promote(managed: ManagedModelStaging) {
 }
 
 describe("managed staging", () => {
+  it("refuses a non-regular baseline or staged recipe without publishing", async () => {
+    const target = repo();
+    const config = path.join(target.radiusDir, "bicepconfig.json");
+    fs.mkdirSync(config);
+    const managed = beginManagedRun(target.root);
+    expect(() => managed.assertBaseline()).toThrow("bicepconfig.json");
+    stageCompleteRun(managed.stagingDir);
+    fs.mkdirSync(path.join(managed.stagingDir, "fixture-recipe.bicep"));
+    await expect(managed.validate(async () => {})).rejects.toThrow(
+      "stable regular file"
+    );
+    expect(fs.existsSync(path.join(target.radiusDir, "app.bicep"))).toBe(false);
+  });
+
+  it("validates an ignored managed copy and publishes only its validated outputs", async () => {
+    const target = repo();
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    fs.writeFileSync(
+      path.join(managed.stagingDir, "resolved-types.json"),
+      "{}\n"
+    );
+    let copy = "";
+    await managed.validate(async (app) => {
+      copy = path.dirname(app);
+      expect(copy).not.toBe(managed.stagingDir);
+      expect(path.dirname(copy)).toBe(target.radiusDir);
+      expect(path.basename(copy)).toMatch(/^\.staging-managed-/u);
+      expect(stagedNames(copy)).toEqual(
+        expect.arrayContaining([
+          "app.bicep",
+          "app.origin.json",
+          "bicepconfig.json",
+          "run.json",
+          "resolved-types.json",
+          ".gitignore"
+        ])
+      );
+      expect(fs.readFileSync(path.join(copy, ".gitignore"), "utf8")).toBe(
+        "*\n"
+      );
+    });
+    await expect(promote(managed)).resolves.toMatchObject({ gitError: "" });
+    expect(
+      fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
+    ).toBe(MODEL);
+    expect(
+      fs.existsSync(path.join(target.radiusDir, "resolved-types.json"))
+    ).toBe(false);
+    expect(fs.existsSync(copy)).toBe(false);
+    expect(fs.existsSync(managed.stagingDir)).toBe(false);
+  });
+
+  it("keeps validator inputs until settlement and preserves them if exit is unconfirmed", async () => {
+    const target = repo();
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    const app = createDeferred<string>();
+    const stopped = createDeferred<void>();
+    const error = new Error("local process exit unconfirmed");
+    const validating = managed.validate(
+      async (file) => {
+        app.resolve(file);
+        await stopped.promise;
+      },
+      (failure) => failure === error
+    );
+    const result = expect(validating).rejects.toThrow(
+      "Validation cleanup is incomplete"
+    );
+    const copy = await app.promise;
+    managed.cancel();
+    expect(fs.existsSync(copy)).toBe(true);
+    stopped.reject(error);
+    await result;
+    expect(fs.existsSync(copy)).toBe(true);
+  });
+
+  it("checks the observed root model and absent origin at both admission and commit", async () => {
+    const target = repo();
+    const model = path.join(target.root, "app.bicep");
+    fs.writeFileSync(model, MODEL);
+    const observed = [
+      {
+        path: "app.bicep",
+        hash: createHash("sha256").update(MODEL).digest("hex")
+      },
+      { path: "app.origin.json", hash: null },
+      { path: ".radius/app.bicep", hash: null }
+    ];
+    fs.writeFileSync(model, "saved edit");
+    expect(() => beginManagedRun(target.root, observed)).toThrow("app.bicep");
+    fs.writeFileSync(model, MODEL);
+    const managed = beginManagedRun(target.root, observed);
+    stageCompleteRun(managed.stagingDir);
+    await managed.validate(async () => {});
+    await expect(
+      managed.promote(async () => {
+        fs.writeFileSync(path.join(target.root, "app.origin.json"), "{}");
+      }, allowPromotion)
+    ).rejects.toThrow("app.origin.json");
+    expect(fs.readFileSync(model, "utf8")).toBe(MODEL);
+    expect(fs.existsSync(path.join(target.radiusDir, "app.bicep"))).toBe(false);
+  });
+
+  it("promotes a legacy root refresh without changing the root model or origin", async () => {
+    const target = repo();
+    const definition = path.join(target.root, "app.bicep");
+    const origin = path.join(target.root, "app.origin.json");
+    fs.writeFileSync(definition, "previous model");
+    fs.writeFileSync(origin, "{}");
+    const hash = (text: string) =>
+      createHash("sha256").update(text).digest("hex");
+    const managed = beginManagedRun(target.root, [
+      { path: "app.bicep", hash: hash("previous model") },
+      { path: "app.origin.json", hash: hash("{}") },
+      { path: ".radius/app.bicep", hash: null },
+      { path: ".radius/app.origin.json", hash: null }
+    ]);
+    stageCompleteRun(managed.stagingDir);
+    await managed.validate(async () => {});
+    await managed.promote(async () => {}, allowPromotion);
+    expect(fs.readFileSync(definition, "utf8")).toBe("previous model");
+    expect(fs.readFileSync(origin, "utf8")).toBe("{}");
+    expect(
+      fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
+    ).toBe(MODEL);
+  });
+
   it("ignores staged and generated graph writes but detects edits to saved model outputs", () => {
     const target = repo("original");
     const managed = beginManagedRun(target.root);

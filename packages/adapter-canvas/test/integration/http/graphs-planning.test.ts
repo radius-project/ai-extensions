@@ -220,7 +220,10 @@ describe("graph concurrency through production HTTP routes", () => {
             await discovery.promise;
             await prepareCommit();
             beforeCommit();
-            options?.onFilesystemCommitted?.();
+            options?.onFilesystemCommitted?.({
+              definitionHash: "fixture-definition",
+              originHash: "fixture-origin"
+            });
             return { published: ["app.bicep"], gitError: "" };
           }
         );

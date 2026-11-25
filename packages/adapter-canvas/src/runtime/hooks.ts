@@ -104,6 +104,7 @@ function staleHandoffGuard(
     rendersInPlace ?
       `If it exists, do not regenerate it; the view at instanceId \`${canvasInstanceId}\` picks it up automatically.`
     : `If it exists, do not regenerate it; reopen the ${page} view so it loads.`,
+    'If you skip generation and the handoff includes a managed request token, call radius_complete_app_authoring with that token and outcome "cancel".',
     "Generate only while the model is still missing."
   ].join(" ");
 }

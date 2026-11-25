@@ -296,6 +296,48 @@ describe("rad process spawn policy", () => {
     );
   });
 
+  it.each(["taskkill", "child close"])(
+    "bounds Windows cancellation when %s never settles",
+    async (pending) => {
+      setProcessPlatform("win32");
+      vi.useFakeTimers();
+      const child = new FakeSpawnedProcess();
+      const taskkill = Object.assign(new EventEmitter(), { kill: vi.fn() });
+      vi.doMock("node:child_process", () => ({
+        spawn: vi.fn().mockReturnValueOnce(child).mockReturnValueOnce(taskkill)
+      }));
+      const { spawnRad, RadProcessExitUnconfirmedError } =
+        await import("./rad-process.mjs");
+      const controller = new AbortController();
+      const settled = vi.fn();
+      const result = spawnRad("validator", [], {
+        signal: controller.signal
+      }).catch(settled);
+
+      controller.abort();
+      child.emit("exit", null, "SIGKILL");
+      if (pending === "child close") taskkill.emit("close", 0);
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(settled).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await result;
+      expect(settled).toHaveBeenCalledExactlyOnceWith(
+        expect.any(RadProcessExitUnconfirmedError)
+      );
+      expect(taskkill.kill).toHaveBeenCalledTimes(
+        pending === "taskkill" ? 1 : 0
+      );
+      if (pending === "taskkill")
+        expect(() =>
+          taskkill.emit("error", new Error("late cleanup error"))
+        ).not.toThrow();
+      taskkill.emit("close", 1);
+      child.emit("close", null, "SIGKILL");
+      expect(child.kill).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    }
+  );
+
   it.each([128, null])(
     "rejects a draining Windows timeout when taskkill closes with %s",
     async (code) => {
@@ -480,7 +522,7 @@ describe("rad process spawn policy", () => {
 
     child.emit("exit", 1, null);
     controller.abort();
-    await vi.runAllTimersAsync();
+    await vi.advanceTimersByTimeAsync(1999);
     expect(settled).not.toHaveBeenCalled();
     expect(kill).toHaveBeenCalledExactlyOnceWith(-child.pid, "SIGKILL");
     child.emit("close", 1, null);

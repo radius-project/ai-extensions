@@ -250,6 +250,8 @@ import {
   prepareSourceRefResources,
   setSourceRefResources
 } from "./source-refs.js";
+import type { SourceRefContextInput, SourceRefEntry } from "./source-refs.js";
+import type { HostCallbackDependencies } from "./runtime/dependencies.js";
 import {
   generateVerifyWorkflow,
   syncRepoWorkflows,
@@ -764,22 +766,6 @@ const remediationRoutes = createRemediationRoutes(
 // route modules free of it. The pure helpers (`computeGraphDiff`, `record`, …)
 // are injected rather than imported by the workflows, matching how the sibling
 // families inject `repoMatchesWorkspace`.
-const observeServerWorkspaceModelingRun = (
-  state: CanvasState,
-  repo: string,
-  branches: string[]
-): Promise<number | null> =>
-  observeWorkspaceModelingRun(
-    repo,
-    branches,
-    {
-      repo: state.workspaceRepo ?? "",
-      branch: state.workspaceBranch ?? "",
-      path: state.workspacePath
-    },
-    modelingRunLastActivityAtMs
-  );
-
 function triggerGraphRepairHandoff(
   entry: CanvasServerEntry,
   request: GraphRepairRequest
@@ -5394,6 +5380,40 @@ export interface ProductionCanvasServerRuntimeOptions {
 export function createProductionCanvasServerRuntime(
   options: ProductionCanvasServerRuntimeOptions
 ) {
+  let authoringLifecycle:
+    | Parameters<HostCallbackDependencies["setAuthoringLifecycle"]>[0]
+    | undefined;
+  function prepareGraphSelection(
+    entry: SourceRefEntry,
+    view: unknown,
+    input: SourceRefContextInput
+  ) {
+    const previous = { ...entry.state.sourceRefSelectionEpochs };
+    const context = prepareSourceRefResources(entry, view, input);
+    if (
+      previous[context.view] !==
+      entry.state.sourceRefSelectionEpochs?.[context.view]
+    )
+      authoringLifecycle?.selectionChanged(entry.state);
+    return context;
+  }
+  function observeServerWorkspaceModelingRun(
+    state: CanvasState,
+    repo: string,
+    branches: string[]
+  ) {
+    return observeWorkspaceModelingRun(
+      repo,
+      branches,
+      {
+        repo: state.workspaceRepo ?? "",
+        branch: state.workspaceBranch ?? "",
+        path: state.workspacePath
+      },
+      modelingRunLastActivityAtMs,
+      () => authoringLifecycle?.liveStage(state, repo, branches)
+    );
+  }
   const {
     executionOwner,
     deploymentRuntime,
@@ -6019,7 +6039,7 @@ export function createProductionCanvasServerRuntime(
     commitBranchResolution: (entry, repo, resolution) =>
       commitWorkspaceBranchResolution(entry.state, repo, resolution),
     prepareSourceRef: (entry, context) =>
-      prepareSourceRefResources(entry, "graph", context),
+      prepareGraphSelection(entry, "graph", context),
     commitSourceRef: (entry, resources, context, expectedToken) =>
       setSourceRefResources(entry, "graph", resources, context, expectedToken),
     isCurrentSourceRef: (entry, expectedToken) =>
@@ -6085,7 +6105,7 @@ export function createProductionCanvasServerRuntime(
       listBranchPaths: (entry, repo, branch) =>
         listBranchPaths(entry, repo, branch),
       prepareSourceRefResources: (entry, view, sourceRefInput) =>
-        prepareSourceRefResources(entry, view, sourceRefInput),
+        prepareGraphSelection(entry, view, sourceRefInput),
       setSourceRefResources: (entry, view, resources, sourceRefInput, token) =>
         setSourceRefResources(entry, view, resources, sourceRefInput, token),
       isCurrentSourceRefToken,
@@ -6575,7 +6595,7 @@ export function createProductionCanvasServerRuntime(
   const deployRequestService = createDeployRequestService({
     runtime: deploymentRuntime,
     plannedGraph: createPlannedGraphRecoveryService({
-      prepareSourceRefResources,
+      prepareSourceRefResources: prepareGraphSelection,
       setSourceRefResources,
       readModelForSelection: graphSources.readForRecovery,
       radArtifactsDirForSelection: graphSources.stage,
@@ -6720,6 +6740,12 @@ export function createProductionCanvasServerRuntime(
 
   return {
     servers: canvasServer.instances,
+    prepareGraphSelection,
+    setAuthoringLifecycle: (
+      lifecycle: NonNullable<typeof authoringLifecycle>
+    ) => {
+      authoringLifecycle = lifecycle;
+    },
     deploymentRuntime,
     detachDeploymentView: deploymentViews.detach,
     setupExecution,

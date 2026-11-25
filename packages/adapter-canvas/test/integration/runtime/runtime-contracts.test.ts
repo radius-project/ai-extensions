@@ -1483,7 +1483,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     expect(harness.session.send).toHaveBeenCalledTimes(1);
     expect(
       harness.deps.workspace.detectWorkspaceContext
-    ).not.toHaveBeenCalled();
+    ).toHaveBeenCalledOnce();
     expect(
       harness.deps.appModel.modelingRunLastActivityAtMs
     ).toHaveBeenCalled();
@@ -1527,7 +1527,10 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       >(async (prepareCommit, beforeCommit, options) => {
         await prepareCommit();
         beforeCommit();
-        options?.onFilesystemCommitted?.();
+        options?.onFilesystemCommitted?.({
+          definitionHash: "fixture-definition",
+          originHash: "fixture-origin"
+        });
         return { published: ["app.bicep"], gitError: "" };
       });
       const runValidator = vi.fn<ProcessDependencies["runValidator"]>(
@@ -1719,6 +1722,35 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         });
         expect(promote).not.toHaveBeenCalled();
       });
+
+      it.each([true, false])(
+        "reports shutdown completeness after a settled validator failure (unconfirmed: %s)",
+        async (unconfirmed) => {
+          const fixture = await setup();
+          const { harness, handoff, runValidator, complete, promote } = fixture;
+          runValidator.mockRejectedValue(
+            unconfirmed ?
+              new RadProcessExitUnconfirmedError(
+                "fixture validator timeout",
+                "",
+                ""
+              )
+            : new Error("fixture validation cancelled")
+          );
+          await handoff();
+          const requestToken = expectHandoffToken(fixture);
+          await expect(
+            complete({ requestToken, outcome: "complete" })
+          ).resolves.toMatchObject({
+            kind: "refused"
+          });
+          expect(promote).not.toHaveBeenCalled();
+          await expect(harness.extension.shutdown("test")).resolves.toEqual({
+            complete: !unconfirmed,
+            exitCode: unconfirmed ? 1 : 0
+          });
+        }
+      );
 
       it("does not promote after the workspace source changes", async () => {
         const fixture = await setup();
@@ -2053,6 +2085,48 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         expect(publisher.spawn).not.toHaveBeenCalled();
       });
 
+      it("reserves a tokenless tag before worktree discovery", async () => {
+        const { harness, publishRecipe, releaseGates } = await setup({
+          publicationFilesExist: true
+        });
+        const started = createDeferred<void>();
+        const held = createDeferred<void>();
+        releaseGates.push(held.resolve);
+        const lookup = vi.mocked(harness.deps.workspace.detectWorkspaceContext);
+        const workspace = { workspacePath: "/workspace", repo, branch: "main" };
+        lookup.mockImplementationOnce(async () => {
+          started.resolve();
+          await held.promise;
+          return workspace;
+        });
+        const first = publishRecipe(recipeArgs);
+        await started.promise;
+        const second = publishRecipe({
+          ...recipeArgs,
+          file: "new-recipe.bicep"
+        });
+        const other = {
+          ...recipeArgs,
+          target: recipeArgs.target.replace(/:1$/u, ":2")
+        };
+        await expect(publishRecipe(other)).resolves.toContain(
+          "Published recipe"
+        );
+        expect(lookup).toHaveBeenCalledTimes(2);
+        const writer = vi.mocked(harness.deps.rad.runRadBicepPublish);
+        expect(writer.mock.calls.map(([input]) => input.target)).toEqual([
+          other.target
+        ]);
+        held.resolve();
+        await expect(first).resolves.toContain("Published recipe");
+        await expect(second).resolves.toContain("Published recipe");
+        expect(writer.mock.calls.map(([input]) => input.file)).toEqual([
+          expect.stringContaining(recipeArgs.file),
+          expect.stringContaining(recipeArgs.file),
+          expect.stringContaining("new-recipe.bicep")
+        ]);
+      });
+
       it("refuses a managed recipe target outside the owning repository before preparing credentials", async () => {
         const fixture = await setup();
         const { harness, handoff, publishRecipe, artifact } = fixture;
@@ -2252,8 +2326,36 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         expect(replacement).not.toBe(requestToken);
         await expect(
           publishRecipe({ requestToken: replacement, ...recipeArgs })
-        ).resolves.toContain("previous Windows process tree");
+        ).resolves.toContain("previous process tree");
         expect(spawn).toHaveBeenCalledOnce();
+      });
+
+      it("does not use a successful case-variant tag to clear another tag's failure", async () => {
+        const fixture = await setup();
+        const { harness, handoff, publishRecipe, complete, promote } = fixture;
+        vi.mocked(harness.deps.rad.runRadBicepPublish).mockRejectedValueOnce(
+          new Error("first tag failed")
+        );
+        await handoff();
+        const requestToken = expectHandoffToken(fixture);
+        await expect(
+          publishRecipe({
+            requestToken,
+            ...recipeArgs,
+            target: "br:ghcr.io/acme/widgets/service:Test"
+          })
+        ).resolves.toContain("first tag failed");
+        await expect(
+          publishRecipe({
+            requestToken,
+            ...recipeArgs,
+            target: "br:ghcr.io/acme/widgets/service:test"
+          })
+        ).resolves.toContain("Published recipe");
+        await expect(
+          complete({ requestToken, outcome: "complete" })
+        ).resolves.toMatchObject({ kind: "refused" });
+        expect(promote).not.toHaveBeenCalled();
       });
 
       it("refuses completion without validating or promoting if admitted recipe publication fails", async () => {
@@ -2558,12 +2660,16 @@ it("blocks a case-variant compiler output after unconfirmed exit only on Windows
 
     const alias = await compile.handler({ targetPath: ".radius/Package.tgz" });
     if (process.platform === "win32") {
-      expect(alias).toContain("previous Windows process tree");
+      expect(alias).toContain("previous process tree");
       expect(run).toHaveBeenCalledOnce();
     } else {
       expect(alias).toContain("Published custom-type extension");
       expect(run).toHaveBeenCalledTimes(2);
     }
+    await expect(harness.extension.shutdown("test")).resolves.toEqual({
+      complete: false,
+      exitCode: 1
+    });
   } finally {
     await harness.extension.shutdown("test");
   }

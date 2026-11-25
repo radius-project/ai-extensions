@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/support/browser/fakes.js";
 import { createModelAuthoringOwner } from "./model-authoring-owner.js";
 
+const committedIdentity = {
+  definitionHash: "fixture-definition",
+  originHash: "fixture-origin"
+};
+
 function fixture(current = () => true, settled?: (promoted: boolean) => void) {
   const target = {
     repo: "org/repo",
@@ -24,12 +29,14 @@ function fixture(current = () => true, settled?: (promoted: boolean) => void) {
       async (
         prepareCommit: () => Promise<void>,
         beforeCommit: () => void,
-        options?: { onFilesystemCommitted?: () => void }
+        options?: {
+          onFilesystemCommitted?: (identity: typeof committedIdentity) => void;
+        }
       ) => {
         await prepareCommit();
         beforeCommit();
         committed(stagingDir);
-        options?.onFilesystemCommitted?.();
+        options?.onFilesystemCommitted?.(committedIdentity);
         return { published: ["app.bicep"], gitError: "" };
       }
     )
@@ -60,6 +67,32 @@ function fixture(current = () => true, settled?: (promoted: boolean) => void) {
 
 describe("model authoring owner", () => {
   const extension = () => "extension";
+
+  it("counts staging only for the current owner of the selected worktree and branch", async () => {
+    let active = true;
+    const settled = vi.fn();
+    const { owner, target, first } = fixture(() => active, settled);
+    expect(
+      owner.currentRun(target.repo, ["other"], target.workspace)
+    ).toBeUndefined();
+    expect(
+      owner.currentRun(target.repo, [target.branch], "/other-worktree")
+    ).toBeUndefined();
+    expect(
+      owner.currentRun(target.repo, [target.branch], target.workspace)
+    ).toMatchObject({
+      token: "one",
+      stagingDir: first.stagingDir
+    });
+
+    active = false;
+    expect(
+      owner.currentRun(target.repo, [target.branch], target.workspace)
+    ).toBeUndefined();
+    expect(first.cancel).toHaveBeenCalledOnce();
+    expect(settled).toHaveBeenCalledExactlyOnceWith(false);
+    await expect(owner.finish("one")).rejects.toThrow("expired");
+  });
 
   it("counts a queue refusal even when no publication work starts", async () => {
     const { runtime, ports, validate } = fixture();
@@ -100,7 +133,9 @@ describe("model authoring owner", () => {
     );
     expect(() => owner.assertStandalone("/other-worktree")).not.toThrow();
     await owner.close();
-    expect(() => owner.assertStandalone(target.workspace)).not.toThrow();
+    expect(() => owner.assertStandalone(target.workspace)).toThrow(
+      "Radius publication is shutting down"
+    );
   });
 
   it("retires the old request only in the worktree that starts a replacement", async () => {
@@ -316,13 +351,13 @@ describe("model authoring owner", () => {
 
   it("settles a promoted revision as successful if its panel closes while Git indexing is still pending", async () => {
     const settled = vi.fn();
-    const { owner, first } = fixture(undefined, settled);
+    const { owner, first, target } = fixture(undefined, settled);
     const indexing = createDeferred<void>();
     const indexed = createDeferred<void>();
     first.promote.mockImplementationOnce(async (prepare, commit, options) => {
       await prepare();
       commit();
-      options?.onFilesystemCommitted?.();
+      options?.onFilesystemCommitted?.(committedIdentity);
       indexing.resolve();
       await indexed.promise;
       return { published: ["app.bicep"], gitError: "index locked" };
@@ -331,15 +366,19 @@ describe("model authoring owner", () => {
     const completion = owner.finish("one");
     try {
       await indexing.promise;
-      expect(owner.cancel("one")).toBe(true);
-      expect(settled).toHaveBeenCalledExactlyOnceWith(true);
+      expect(
+        owner.currentRun(target.repo, [target.branch], target.workspace)
+      ).toBeUndefined();
+      owner.retire("one");
+      expect(() => owner.cancel("one")).toThrow("cancellation is too late");
+      expect(settled).not.toHaveBeenCalled();
     } finally {
       indexed.resolve();
     }
     await expect(completion).resolves.toMatchObject({
       gitError: "index locked"
     });
-    expect(settled).toHaveBeenCalledOnce();
+    expect(settled).toHaveBeenCalledExactlyOnceWith(true, committedIdentity);
   });
 
   it("does not promote if the source changes while validation is running", async () => {

@@ -449,6 +449,11 @@ describe("graphs-planning load-graph-stream route", () => {
 
   it("hands off app.bicep generation and streams a needsAppBicep done frame when no bicep exists", async () => {
     const { deps, calls } = fakes({
+      state: {
+        workspacePath: "/workspace",
+        workspaceRepo: REPO,
+        workspaceBranch: DEFAULT_BRANCH
+      },
       selection: selection({ content: null })
     });
     const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
@@ -476,6 +481,11 @@ describe("graphs-planning load-graph-stream route", () => {
 
   it("refuses a missing model when the source has no usable Dockerfile", async () => {
     const { deps, calls } = fakes({
+      state: {
+        workspacePath: "/workspace",
+        workspaceRepo: REPO,
+        workspaceBranch: DEFAULT_BRANCH
+      },
       selection: selection({ content: null }),
       paths: ["README.md", ".devcontainer/Dockerfile"]
     });
@@ -649,6 +659,11 @@ describe("graphs-planning load-graph-stream route", () => {
           return selection();
         };
       } else if (stage === "eligibility") {
+        Object.assign(entry.state, {
+          workspacePath: "/workspace",
+          workspaceRepo: REPO,
+          workspaceBranch: DEFAULT_BRANCH
+        });
         deps.listBranchPaths = async () => {
           supersede();
           return ["Dockerfile"];
@@ -739,7 +754,14 @@ describe("graphs-planning load-graph-stream route", () => {
   });
 
   it("does not author a missing model when its source changes during eligibility lookup", async () => {
-    const { deps, calls } = fakes({ selection: selection({ content: null }) });
+    const { deps, calls } = fakes({
+      state: {
+        workspacePath: "/workspace",
+        workspaceRepo: REPO,
+        workspaceBranch: DEFAULT_BRANCH
+      },
+      selection: selection({ content: null })
+    });
     let current = true;
     deps.isCurrentSourceRef = () => current;
     deps.listBranchPaths = async () => {
@@ -748,6 +770,39 @@ describe("graphs-planning load-graph-stream route", () => {
     };
     const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
     expect(frames(recording.stream).at(-1)?.data).toEqual({ stale: true });
+    expect(
+      calls.some((call) => call.startsWith("triggerAppBicepHandoff"))
+    ).toBe(false);
+  });
+
+  it("reports a missing model as read-only if the checkout changes during eligibility lookup", async () => {
+    const { deps, entry, calls } = fakes({
+      state: {
+        workspacePath: "/workspace",
+        workspaceRepo: REPO,
+        workspaceBranch: DEFAULT_BRANCH
+      },
+      selection: selection({ content: null })
+    });
+    if (!entry) throw new Error("Expected entry");
+    deps.listBranchPaths = async () => {
+      entry.state.workspaceBranch = "another-branch";
+      return ["Dockerfile"];
+    };
+
+    const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+    expect(
+      frames(recording.stream).filter(({ event }) => event === "done")
+    ).toEqual([
+      {
+        event: "done",
+        data: {
+          error: expect.stringContaining("read-only"),
+          repo: REPO,
+          branch: DEFAULT_BRANCH
+        }
+      }
+    ]);
     expect(
       calls.some((call) => call.startsWith("triggerAppBicepHandoff"))
     ).toBe(false);

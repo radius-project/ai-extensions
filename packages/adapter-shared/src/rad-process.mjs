@@ -36,10 +36,12 @@ export class RadProcessError extends Error {
   }
 }
 
+const CLEANUP_TIMEOUT_MS = 2000;
+
 export class RadProcessExitUnconfirmedError extends RadProcessError {
-  constructor(message, stdout, stderr) {
+  constructor(message, stdout, stderr, platform = "win32") {
     super(
-      `${message}. Windows process-tree exit could not be confirmed; do not use the affected target.`,
+      `${message}. ${platform === "win32" ? "Windows process-tree" : "Process-tree"} exit could not be confirmed; do not use the affected target.`,
       stdout,
       stderr
     );
@@ -91,14 +93,33 @@ export function killChildTree(child, platform = process.platform) {
       );
       return new Promise((resolve) => {
         let failed = false;
-        taskkill.once("error", () => {
+        let finished = false;
+        const timer = setTimeout(() => {
+          finish(false);
+          try {
+            taskkill.kill();
+          } catch {
+            // Timing out only reports uncertainty; it does not prove exit.
+          }
+        }, CLEANUP_TIMEOUT_MS);
+        function finish(terminated) {
+          finished = true;
+          clearTimeout(timer);
+          taskkill.removeListener("close", onClose);
+          resolve(terminated);
+        }
+        function onError() {
+          if (finished) return;
           failed = true;
           killChild();
-        });
-        taskkill.once("close", (code) => {
+        }
+        function onClose(code) {
+          taskkill.removeListener("error", onError);
           if (!failed && code !== 0) killChild();
-          resolve(!failed && code === 0);
-        });
+          finish(!failed && code === 0);
+        }
+        taskkill.once("error", onError);
+        taskkill.once("close", onClose);
       });
     } else {
       process.kill(-child.pid, "SIGKILL");
@@ -168,6 +189,7 @@ export function spawnRad(
     let stderr = "";
     let settled = false;
     let graceTimer = null;
+    let stopTimer = null;
     let exited = null;
     let stopReason;
     let childClosed = false;
@@ -186,8 +208,7 @@ export function spawnRad(
         stop(message);
         return;
       }
-      settled = true;
-      if (graceTimer) clearTimeout(graceTimer);
+      complete();
       void killChildTree(child);
       reject(new RadProcessError(message, stdout, stderr));
     }, timeout);
@@ -203,10 +224,23 @@ export function spawnRad(
         exited && process.platform === "win32" ?
           Promise.resolve(false)
         : killChildTree(child);
+      function rejectUnconfirmed() {
+        if (settled) return;
+        complete();
+        reject(
+          new RadProcessExitUnconfirmedError(
+            message,
+            stdout,
+            stderr,
+            process.platform
+          )
+        );
+      }
+      stopTimer = setTimeout(rejectUnconfirmed, CLEANUP_TIMEOUT_MS);
       void Promise.resolve(treeCleanup).then((terminated) => {
+        if (settled) return;
         if (terminated === false) {
-          complete();
-          reject(new RadProcessExitUnconfirmedError(message, stdout, stderr));
+          rejectUnconfirmed();
         } else {
           treeDrained = true;
           if (childClosed) {
@@ -225,6 +259,10 @@ export function spawnRad(
       clearTimeout(timer);
       abortSignal?.removeEventListener("abort", abort);
       if (graceTimer) clearTimeout(graceTimer);
+      if (stopTimer) clearTimeout(stopTimer);
+      child.removeListener("exit", onExit);
+      child.removeListener("close", onClose);
+      // Keep the one-shot error listener for a late process error.
       try {
         child.stdout?.destroy();
       } catch {
@@ -240,7 +278,6 @@ export function spawnRad(
     function finalize(code, signal) {
       if (settled) return;
       if (stopReason) {
-        childClosed = true;
         if (!treeDrained) return;
         complete();
         reject(new RadProcessError(stopReason, stdout, stderr));
@@ -262,25 +299,26 @@ export function spawnRad(
       }
     }
 
-    child.on("error", (error) => {
+    function onError(error) {
       if (settled || stopReason) return;
-      settled = true;
-      clearTimeout(timer);
-      abortSignal?.removeEventListener("abort", abort);
-      if (graceTimer) clearTimeout(graceTimer);
+      complete();
       reject(new RadProcessError(error.message, stdout, stderr));
-    });
-    child.on("exit", (code, signal) => {
+    }
+    function onExit(code, signal) {
       exited = { code, signal };
       if (settled || graceTimer || stopReason) return;
       // The exit grace period can truncate inherited stdio while a descendant
       // is still running. Draining Windows callers must wait for close instead.
       if (drainOnStop && process.platform === "win32") return;
       graceTimer = setTimeout(() => finalize(code, signal), 2000);
-    });
-    child.on("close", (code, signal) => {
+    }
+    function onClose(code, signal) {
+      childClosed = true;
       if (exited) finalize(exited.code, exited.signal);
       else finalize(code, signal);
-    });
+    }
+    child.once("error", onError);
+    child.once("exit", onExit);
+    child.once("close", onClose);
   });
 }

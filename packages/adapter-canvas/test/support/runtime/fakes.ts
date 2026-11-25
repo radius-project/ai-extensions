@@ -156,6 +156,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   let lastWebviewActivityAt = 0;
 
   const capturedHostCallbacks: {
+    authoringLifecycle?: Parameters<
+      RadiusExtensionDependencies["hostCallbacks"]["setAuthoringLifecycle"]
+    >[0];
     appBicepHandoff?: Parameters<
       RadiusExtensionDependencies["hostCallbacks"]["setAppBicepHandoff"]
     >[0];
@@ -389,6 +392,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       validateGhcrTargetForRepo: vi.fn(validateGhcrTargetForRepo)
     },
     hostCallbacks: {
+      setAuthoringLifecycle: vi.fn((lifecycle) => {
+        capturedHostCallbacks.authoringLifecycle = lifecycle;
+      }),
       setAppBicepHandoff: vi.fn((fn) => {
         capturedHostCallbacks.appBicepHandoff = fn;
       }),

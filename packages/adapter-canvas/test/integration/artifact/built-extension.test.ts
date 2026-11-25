@@ -1168,7 +1168,7 @@ describe("P0-C built Radius extension artifact", () => {
     );
 
     expect(skillGuidance).toMatch(
-      /show-radius-type\.mjs` fails while locating, querying, or validating.*stop the modeling run.*promote-app-model\.mjs.*--abort.*report the exact error/su
+      /show-radius-type\.mjs` fails while locating, querying, or validating[^\n]*stop the modeling run, report the exact error, and follow \[When a step fails\]/u
     );
     expect(skillGuidance).toMatch(
       /This includes a missing binary, invalid or incomplete version JSON, a missing or unsupported stamped release identity, a noncanonical commit, and a pull-request release, for which no Radius Bicep types are published\./u
@@ -1218,10 +1218,18 @@ describe("P0-C built Radius extension artifact", () => {
       "Only exit `1` permits a model edit in response to checker output."
     );
     expect(exitTwoRow).toContain(
-      '"<loaded-node>" "<loaded-skill-base>/scripts/promote-app-model.mjs" --abort --staging "<staging-dir>"'
+      "Stop the run and follow [When a step fails](#when-a-step-fails)."
+    );
+    expect(exitTwoRow).not.toContain("--abort");
+    const failureGuidance = skillGuidance.split("### When a step fails")[1];
+    expect(failureGuidance).toMatch(
+      /For a standalone run only, discard the run with:\n\n```text\n[^\n]*promote-app-model\.mjs" --abort --staging "<staging-dir>"/u
+    );
+    expect(failureGuidance).toMatch(
+      /radius_report_modeling_failure[^\n]*while the token is live, before any cancellation/u
     );
     expect(exitTwoRow).toContain(
-      "report the exact checker failure, and state that no application model was written."
+      "Report the exact checker failure and state that no application model was written."
     );
     expect(exitTwoRow).toContain(
       "Do not edit the model based on this result, write `app.origin.json`, publish, or claim that the model compiled."

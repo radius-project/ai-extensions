@@ -15,6 +15,7 @@
 import { createRadiusCanvas } from "./create-radius-canvas.js";
 import { redactCredentials } from "@radius-project/core";
 import { createRadiusTools } from "./create-radius-tools.js";
+import { READ_ONLY_MODEL_SELECTION } from "../workspace.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import { createAppModelHandoff } from "./app-model-handoff.js";
 import { createCanvasModelAuthoring } from "./canvas-model-authoring.js";
@@ -55,7 +56,7 @@ export interface RadiusShutdownOutcome {
 
 export interface RadiusExtension {
   canvases: ReturnType<typeof createRadiusCanvas>[];
-  tools: ReturnType<typeof createRadiusTools>;
+  tools: ReturnType<typeof createRadiusTools>["tools"];
   hooks: {
     onPreToolUse: (input: {
       toolName?: unknown;
@@ -152,7 +153,8 @@ export function createRadiusExtension(
         repo,
         branches,
         workspace,
-        deps.appModel.modelingRunLastActivityAtMs
+        deps.appModel.modelingRunLastActivityAtMs,
+        (path) => authoring.owner.currentRun(repo, branches, path)?.stagingDir
       )
   });
 
@@ -180,14 +182,29 @@ export function createRadiusExtension(
   // why it, and no hook or canvas-open fallback, decides whether the model needs
   // authoring, refreshing, confirming, or only a note.
   const authoring = createCanvasModelAuthoring(deps, workspaceState);
+  deps.hostCallbacks.setAuthoringLifecycle({
+    liveStage: (state, repo, branches) =>
+      authoring.owner.currentRun(repo, branches, state.workspacePath)
+        ?.stagingDir,
+    selectionChanged: authoring.selectionChanged
+  });
   const handOffAppModel = createAppModelHandoff({
     beginManaged: authoring.begin,
-    cancelManaged: authoring.owner.cancel,
+    cancelManaged: authoring.owner.retire,
+    currentManaged: authoring.owner.currentRun,
     resolveContext: () => workspaceState(),
     resolveStatus: (repo, branch, state) =>
       resolveAppModelStatus(repo, branch, state),
     assertWorkspaceSource: (source) =>
       deps.graphSources.assertWorkspaceSource(source),
+    async isCurrentManagedWorkspace(source) {
+      const workspace = await workspaceState();
+      return (
+        workspace.workspacePath === source.workspacePath &&
+        workspace.workspaceRepo === source.repo &&
+        workspace.workspaceBranch === source.ref
+      );
+    },
     authorizeMissingModel(page, state, statuses) {
       if (
         page !== "graph" ||
@@ -195,9 +212,7 @@ export function createRadiusExtension(
         statuses.length !== 1 ||
         statuses[0].source.kind !== "workspace"
       ) {
-        throw new Error(
-          "This graph selection is read-only. To create .radius/app.bicep, open the modeled graph for the branch checked out in this workspace."
-        );
+        throw new Error(READ_ONLY_MODEL_SELECTION);
       }
     },
     evaluateSource: (repo, branch, state) =>
@@ -369,11 +384,19 @@ export function createRadiusExtension(
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
       const authoringDrain = authoring.owner.close();
+      const publicationDrain = closePublication();
       shuttingDown = true;
       const drain = deps.executionOwner.shutdown();
       const deploymentDrain =
         deps.deployment.owner.shutdown(CLEANUP_TIMEOUT_MS);
       let complete = true;
+      function reportWriterDrain(results: boolean[]) {
+        if (results.every(Boolean)) return;
+        complete = false;
+        deps.logError(
+          "Radius shutdown incomplete: a local authoring or publication process could not be confirmed stopped."
+        );
+      }
       try {
         console.error(
           `[radius] received ${signal}; shutting down ${deps.servers.size} canvas server(s)...`
@@ -422,7 +445,9 @@ export function createRadiusExtension(
               ...closes,
               drained,
               deploymentsDrained,
-              authoringDrain
+              Promise.all([publicationDrain, authoringDrain]).then(
+                reportWriterDrain
+              )
             ]),
             CLEANUP_TIMEOUT_MS
           ))
@@ -578,14 +603,15 @@ export function createRadiusExtension(
     });
   }
 
+  const { tools, closePublication } = createRadiusTools(
+    deps,
+    modelingActivity,
+    missingModelHandoffs,
+    authoring.owner
+  );
   return {
     canvases: [createRadiusCanvas(deps, authoring, canvasInstances)],
-    tools: createRadiusTools(
-      deps,
-      modelingActivity,
-      missingModelHandoffs,
-      authoring.owner
-    ),
+    tools,
     hooks: {
       // Nothing here inspects the application model any more. Opening a graph
       // page used to be denied until .radius/app.bicep existed, but every graph

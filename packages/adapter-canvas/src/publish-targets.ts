@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { STAGING_DIR_PREFIX } from "@radius-project/core";
 import { toSafeRepoRelPath } from "./workspace.js";
 
@@ -90,8 +90,9 @@ function confineUnderRadius(
       `Path escapes the workspace .radius directory via a symlink: ${raw}`
     );
   }
-  assertStandaloneArtifact(realProbe.slice(realRoot.length));
-  return existsSync(resolved) ? realProbe : resolved;
+  const canonical = resolve(realProbe, relative(probe, resolved));
+  assertStandaloneArtifact(relative(realRoot, canonical));
+  return canonical;
 }
 
 // Resolve a source path that the tool reads or compiles (a recipe .bicep or a
