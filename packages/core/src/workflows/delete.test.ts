@@ -12,6 +12,12 @@ import {
   RADIUS_REF,
   generateDeleteWorkflow
 } from "./delete.js";
+import { assertTrustedGeneratedWorkflow } from "./generated-policy.js";
+import {
+  expectAksTokenStep,
+  expectNoAksTokenHandling,
+  readCommittedTemplate
+} from "../../test/support/committed-workflows.js";
 
 // Minimal stand-ins for the delete templates the generator fills. The
 // application-delete templates are fetched from radius-project/ai-extensions; the
@@ -286,4 +292,30 @@ describe("generateDeleteWorkflow", () => {
 
     expect(JSON.stringify(templates)).toBe(snapshot);
   });
+});
+
+describe("the committed delete templates on an AKS cluster with Microsoft Entra integration", () => {
+  const files = generateDeleteWorkflow(
+    "prod",
+    Object.fromEntries(
+      ALL_FILES.map((file) => [file, readCommittedTemplate(file)])
+    )
+  );
+
+  it.each([DELETE_AZURE_FILE, DELETE_ENV_AZURE_FILE])(
+    "gives %s an AKS token in place of kubelogin",
+    (file) => {
+      expectAksTokenStep(files[file], DELETE_RADIUS_REF);
+      expect(() =>
+        assertTrustedGeneratedWorkflow(parseYaml, files[file], "provider", file)
+      ).not.toThrow();
+    }
+  );
+
+  it.each([DELETE_AWS_FILE, DELETE_ENV_AWS_FILE])(
+    "leaves %s without AKS token handling",
+    (file) => {
+      expectNoAksTokenHandling(files[file]);
+    }
+  );
 });
