@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { serializeAppOrigin } from "@radius-project/core";
+import { createDeferred } from "../../test/support/browser/fakes.js";
 import { hashAppBicep } from "../app-bicep-hash.js";
 import {
   createRadiusExtension,
@@ -628,7 +629,7 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
   // The memo key names the commit each origin record carries, so a long session
   // that regenerates repeatedly would otherwise grow it for as long as the
   // process runs.
-  it("evicts the oldest remembered staleness rather than growing the memo forever", async () => {
+  it("evicts the oldest memo without letting late failure release its replacement", async () => {
     let commit = 0;
     const fake = createFakeDependencies({
       bicepByRepoBranch: { "workspace:acme/widgets@main": "resource db {}" },
@@ -660,15 +661,25 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
       return send.mock.calls.length;
     };
 
-    expect(await report(1)).toBe(1);
+    const sending = createDeferred<void>();
+    const delivery = createDeferred<void>();
+    send.mockImplementationOnce(() => {
+      sending.resolve();
+      return delivery.promise;
+    });
+    const first = report(1);
+    const failed = expect(first).rejects.toThrow("old delivery failed");
+    await sending.promise;
+    try {
+      expect(await report(1)).toBe(0);
+      for (let at = 2; at <= 101; at += 1) await report(at);
+      expect(await report(1)).toBe(1);
+    } finally {
+      delivery.reject(new Error("old delivery failed"));
+      await failed;
+    }
+
     expect(await report(1)).toBe(0);
-
-    // Push the first problem past the memo's limit.
-    for (let at = 2; at <= 130; at += 1) await report(at);
-
-    // Re-asking about a signal that fell out is harmless: the point is to stop a
-    // tight loop, not to remember forever.
-    expect(await report(1)).toBe(1);
   });
 
   it("releases the handoff reservation when the session rejects delivery, allowing a later call to deliver", async () => {

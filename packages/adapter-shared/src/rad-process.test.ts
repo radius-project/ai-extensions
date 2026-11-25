@@ -464,6 +464,32 @@ describe("rad process spawn policy", () => {
     expect(processKill).toHaveBeenCalledWith(-child.pid, "SIGKILL");
   });
 
+  it("does not settle from the exit grace timer after cancellation", async () => {
+    vi.useFakeTimers();
+    setProcessPlatform("linux");
+    const child = new FakeSpawnedProcess();
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+    vi.doMock("node:child_process", () => ({ spawn: () => child }));
+    const { spawnRad } = await import("./rad-process.mjs");
+    const controller = new AbortController();
+    const settled = vi.fn();
+    const result = spawnRad("validator", [], {
+      label: "validator",
+      signal: controller.signal
+    }).catch(settled);
+
+    child.emit("exit", 1, null);
+    controller.abort();
+    await vi.runAllTimersAsync();
+    expect(settled).not.toHaveBeenCalled();
+    expect(kill).toHaveBeenCalledExactlyOnceWith(-child.pid, "SIGKILL");
+    child.emit("close", 1, null);
+    await result;
+    expect(settled).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: "validator was cancelled" })
+    );
+  });
+
   it("reports a spawn error and cancels an active exit grace period", async () => {
     vi.useFakeTimers();
     setProcessPlatform("linux");

@@ -267,8 +267,7 @@ const dependencies: RadiusExtensionDependencies = {
     setOpenSourceHandler
   },
   process: {
-    runValidator: (cmd, args, options) =>
-      spawnRad(cmd, args, { ...options, label: "Radius model validator" }),
+    runValidator: spawnRad,
     existsSync,
     execFile: (cmd, args, options) => execFileAsync(cmd, args, options)
   },

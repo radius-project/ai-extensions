@@ -103,6 +103,24 @@ describe("model authoring owner", () => {
     expect(() => owner.assertStandalone(target.workspace)).not.toThrow();
   });
 
+  it("retires the old request only in the worktree that starts a replacement", async () => {
+    const { owner, target, ports, first, second, validate } = fixture();
+    const otherTarget = { ...target, workspace: "/other-worktree" };
+    const replacement = { ...first, cancel: vi.fn() };
+    ports.staging.mockReturnValueOnce(replacement);
+    owner.begin("other", otherTarget, () => true, validate);
+    owner.begin("replacement", target, () => true, validate);
+
+    expect(first.cancel).toHaveBeenCalledOnce();
+    expect(second.cancel).not.toHaveBeenCalled();
+    await expect(owner.finish("one")).rejects.toThrow("expired");
+    ports.resolveTarget.mockResolvedValue(otherTarget);
+    await owner.finish("other");
+    expect(second.promote).toHaveBeenCalledOnce();
+    ports.resolveTarget.mockResolvedValue(target);
+    await owner.finish("replacement");
+  });
+
   it("does not start publication once validation has begun", async () => {
     const { owner, validate, first } = fixture();
     const started = createDeferred<void>();

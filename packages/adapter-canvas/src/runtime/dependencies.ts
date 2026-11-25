@@ -229,7 +229,12 @@ export interface ProcessDependencies {
   runValidator(
     cmd: string,
     args: string[],
-    options: { cwd: string; timeout: number; signal: AbortSignal }
+    options: {
+      cwd: string;
+      timeout: number;
+      signal: AbortSignal;
+      label: string;
+    }
   ): Promise<{ stdout: string; stderr: string }>;
   execFile(
     cmd: string,

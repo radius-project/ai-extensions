@@ -139,7 +139,12 @@ export function createCanvasModelAuthoring(
                 appFile,
                 "--managed-final"
               ],
-              { cwd: workspace, timeout: 120_000, signal }
+              {
+                cwd: workspace,
+                timeout: 120_000,
+                signal,
+                label: "Radius model validator"
+              }
             );
           } catch (error) {
             const stderr =

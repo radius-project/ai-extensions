@@ -1753,6 +1753,23 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     });
 
     describe("refresh replacement", () => {
+      it("does not start validation without a saved workspace revision and retries when it is readable", async () => {
+        const fixture = await setup({ refresh: true, revision: "" });
+        const { harness, handoff, currentToken, source, runValidator } =
+          fixture;
+        await expect(handoff()).rejects.toThrow(
+          "Cannot establish the managed Radius authoring source or validator."
+        );
+        expect(currentToken()).toBeUndefined();
+        expect(harness.session.send).not.toHaveBeenCalled();
+        expect(runValidator).not.toHaveBeenCalled();
+
+        source.revision = "saved-source-1";
+        await handoff();
+        expectHandoffToken(fixture);
+        expect(harness.session.send).toHaveBeenCalledOnce();
+      });
+
       it("offers a new attempt after a cancelled refresh", async () => {
         const fixture = await setup({ refresh: true });
         const { harness, handoff, complete, currentToken, runValidator } =
@@ -2034,6 +2051,24 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           expect(result).toContain("active managed");
         }
         expect(publisher.spawn).not.toHaveBeenCalled();
+      });
+
+      it("refuses a managed recipe target outside the owning repository before preparing credentials", async () => {
+        const fixture = await setup();
+        const { harness, handoff, publishRecipe, artifact } = fixture;
+        await handoff();
+        const requestToken = expectHandoffToken(fixture);
+
+        await expect(
+          publishRecipe({
+            ...recipeArgs,
+            requestToken,
+            target: "br:ghcr.io/other/repo/recipe:v1"
+          })
+        ).resolves.toContain("must publish under the repository being modeled");
+        expect(harness.deps.withGhcrDockerConfig).not.toHaveBeenCalled();
+        expect(harness.deps.rad.runRadBicepPublish).not.toHaveBeenCalled();
+        expect(artifact).not.toHaveBeenCalled();
       });
 
       it("refuses recipe publication if the source changes during credential setup", async () => {
@@ -2502,6 +2537,36 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
 
     await harness.extension.shutdown("test");
   });
+});
+
+it("blocks a case-variant compiler output after unconfirmed exit only on Windows", async () => {
+  const harness = await createRuntimeSdkHarness();
+  const compile = harness.extension.tools.find(
+    (tool) => tool.name === "radius_publish_custom_type_extension"
+  );
+  if (!compile) throw new Error("Compilation tool not registered");
+  const run = vi
+    .fn(async () => {})
+    .mockRejectedValueOnce(
+      new RadProcessExitUnconfirmedError("fixture exit unconfirmed", "", "")
+    );
+  harness.deps.rad.runRadBicepPublishExtension = run;
+  try {
+    await expect(
+      compile.handler({ targetPath: ".radius/package.tgz" })
+    ).resolves.toContain("fixture exit unconfirmed");
+
+    const alias = await compile.handler({ targetPath: ".radius/Package.tgz" });
+    if (process.platform === "win32") {
+      expect(alias).toContain("previous Windows process tree");
+      expect(run).toHaveBeenCalledOnce();
+    } else {
+      expect(alias).toContain("Published custom-type extension");
+      expect(run).toHaveBeenCalledTimes(2);
+    }
+  } finally {
+    await harness.extension.shutdown("test");
+  }
 });
 
 it("routes registered publication tools without a Canvas panel", async () => {

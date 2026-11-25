@@ -430,6 +430,147 @@ describe("createAppModelHandoff", () => {
     expect(sent).toHaveLength(4);
   });
 
+  it("releases the oldest promoted revision so that branch can refresh again", async () => {
+    const beginManaged = vi.fn<AppModelHandoffDependencies["beginManaged"]>(
+      (_state, _repo, _branch, _token, _revision, handoff) => handoff
+    );
+    const { handOff, sent } = harness({
+      beginManaged,
+      resolveStatus: async (repo, branch) =>
+        modelStatus(repo, branch, { status: "source-changed" })
+    });
+    const poll = (index: number) =>
+      handOff({
+        repo: "a/b",
+        branches: [`feature/${index}`],
+        page: "graph",
+        state: { canvasInstanceId: "model-panel" }
+      });
+
+    for (let index = 0; index <= 100; index++) {
+      await poll(index);
+      beginManaged.mock.calls[index][7]?.(true);
+    }
+
+    await poll(100);
+    expect(sent).toHaveLength(101);
+    await poll(0);
+    expect(sent).toHaveLength(102);
+    expect(beginManaged.mock.lastCall?.[2]).toBe("feature/0");
+  });
+
+  it("releases a refresh memo when the selection changes during skill preparation", async () => {
+    const preparing = createDeferred<void>();
+    const prepared = createDeferred<string>();
+    const { handOff, sent } = harness({
+      resolveStatus: async (repo, branch) =>
+        modelStatus(repo, branch, { status: "source-changed" }),
+      skillHandoff: vi
+        .fn(async () => SKILL_HANDOFF)
+        .mockImplementationOnce(() => {
+          preparing.resolve();
+          return prepared.promise;
+        })
+    });
+    let current = true;
+    const request = {
+      repo: "a/b",
+      branches: ["main"],
+      page: "graph",
+      state: {},
+      isCurrent: () => current
+    };
+    const stale = handOff(request);
+    await preparing.promise;
+    current = false;
+    prepared.resolve(SKILL_HANDOFF);
+    await stale;
+
+    expect(sent).toHaveLength(0);
+    current = true;
+    await handOff(request);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("preserves the newer refresh when its reservation replaces one preparing the skill", async () => {
+    const preparing = createDeferred<void>();
+    const prepared = createDeferred<string>();
+    const sending = createDeferred<void>();
+    const delivered = createDeferred<void>();
+    let sourceCommit = "old";
+    const send = vi.fn(() => {
+      sending.resolve();
+      return delivered.promise;
+    });
+    const { handOff } = harness({
+      resolveStatus: async (repo, branch) =>
+        modelStatus(repo, branch, { status: "source-changed", sourceCommit }),
+      skillHandoff: vi
+        .fn(async () => SKILL_HANDOFF)
+        .mockImplementationOnce(() => {
+          preparing.resolve();
+          return prepared.promise;
+        }),
+      send
+    });
+    const state: CanvasState = {};
+    const request = { repo: "a/b", branches: ["main"], page: "graph", state };
+    const stale = handOff(request);
+    await preparing.promise;
+    sourceCommit = "new";
+    const replacement = handOff(request);
+    await sending.promise;
+    try {
+      const replacementKey = state.appBicepHandoffKey;
+      expect(replacementKey).toBeDefined();
+      prepared.resolve(SKILL_HANDOFF);
+      await stale;
+      expect(send).toHaveBeenCalledOnce();
+      expect(state.appBicepHandoffKey).toBe(replacementKey);
+    } finally {
+      delivered.resolve();
+      await replacement;
+    }
+  });
+
+  it.each(["cancelled", "expired"] as const)(
+    "does not announce a missing-model request %s while delivery is pending",
+    async (outcome) => {
+      const sending = createDeferred<void>();
+      const delivery = createDeferred<void>();
+      const beginManaged = vi.fn<AppModelHandoffDependencies["beginManaged"]>(
+        (_state, _repo, _branch, _token, _revision, handoff) => handoff
+      );
+      const { handOff, announced, advance } = harness({
+        beginManaged,
+        resolveStatus: async (repo, branch) =>
+          modelStatus(repo, branch, { status: "missing" }),
+        send: vi
+          .fn(async () => {})
+          .mockImplementationOnce(() => {
+            sending.resolve();
+            return delivery.promise;
+          })
+      });
+      const state: CanvasState = { canvasInstanceId: "model-panel" };
+      const request = { repo: "a/b", branches: ["main"], page: "graph", state };
+      const pending = handOff(request);
+      await sending.promise;
+      try {
+        expect(beginManaged).toHaveBeenCalledOnce();
+        if (outcome === "cancelled") beginManaged.mock.calls[0][7]?.(false);
+        else advance(MISSING_MODEL_HANDOFF_CLAIM_TTL_MS + 1);
+      } finally {
+        delivery.resolve();
+        await pending;
+      }
+
+      expect(announced).toEqual([]);
+      await handOff(request);
+      expect(announced).toEqual([{ repo: "a/b", branches: ["main"] }]);
+    }
+  );
+
   it("does not refresh an authoring result that still looks stale at the same saved revision", async () => {
     let status: AppModelFreshnessStatus = "missing";
     const beginManaged = vi.fn<AppModelHandoffDependencies["beginManaged"]>(

@@ -1,4 +1,7 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { spawnRad } from "@radius-project/adapter-shared";
 import { describe, expect, it, vi } from "vitest";
 import { createFakeDependencies } from "../../test/support/runtime/fakes.js";
 import type { CanvasState } from "../shared.js";
@@ -13,20 +16,20 @@ const SKILL = resolve("fixture-skill");
 const NODE = resolve("fixture-node");
 const BOOTSTRAP = JSON.stringify({ nodeCommand: NODE, skillBase: SKILL });
 
-async function fixture() {
+async function fixture(workspacePath = WORKSPACE) {
   const { deps, servers } = createFakeDependencies();
   const entry = await deps.getOrCreateServer("panel", "graph");
   const workspace: CanvasState = {
     workspaceRepo: REPO,
     workspaceBranch: BRANCH,
-    workspacePath: WORKSPACE
+    workspacePath
   };
   Object.assign(entry.state, workspace, {
     canvasInstanceId: "panel",
     appModelAttemptTokens: { "octo/app::main": TOKEN }
   });
   const appFile = join(
-    WORKSPACE,
+    workspacePath,
     ".radius",
     ".staging-managed-fixture",
     "app.bicep"
@@ -76,6 +79,41 @@ async function fixture() {
 }
 
 describe("createCanvasModelAuthoring", () => {
+  it("reports diagnostics from a real validator process without promoting", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "radius-validator-"));
+    try {
+      const skillBase = join(workspace, "skill");
+      const scripts = join(skillBase, "scripts");
+      const h = await fixture(workspace);
+      h.deps.process.runValidator = spawnRad;
+      await mkdir(scripts, { recursive: true });
+      await mkdir(join(h.appFile, ".."), { recursive: true });
+      await writeFile(h.appFile, "fixture model");
+      await writeFile(
+        join(scripts, "validate-bicep.mjs"),
+        `import { readFileSync, realpathSync } from "node:fs";
+         import { join } from "node:path";
+         const [, , appFile, flag] = process.argv;
+         if (flag !== "--managed-final" ||
+             realpathSync(appFile) !== realpathSync(join(process.cwd(), ".radius", ".staging-managed-fixture", "app.bicep")) ||
+             readFileSync(appFile, "utf8") !== "fixture model") {
+           throw new Error("Unexpected validator inputs");
+         }
+         process.stderr.write("Fixture model rejected");
+         process.exitCode = 1;`
+      );
+      h.begin(JSON.stringify({ nodeCommand: process.execPath, skillBase }));
+
+      await expect(h.authoring.owner.finish(TOKEN)).rejects.toThrow(
+        "Radius model validation failed: Fixture model rejected"
+      );
+      expect(h.promote).not.toHaveBeenCalled();
+      expect(h.settled).toHaveBeenCalledExactlyOnceWith(false);
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     ["invalid JSON", "{"],
     ["null bootstrap", "null"],
@@ -186,7 +224,12 @@ describe("createCanvasModelAuthoring", () => {
         h.appFile,
         "--managed-final"
       ],
-      { cwd: WORKSPACE, timeout: 120_000, signal: expect.any(AbortSignal) }
+      {
+        cwd: WORKSPACE,
+        timeout: 120_000,
+        signal: expect.any(AbortSignal),
+        label: "Radius model validator"
+      }
     );
     expect(h.promote).not.toHaveBeenCalled();
     expect(h.settled).toHaveBeenCalledExactlyOnceWith(false);
