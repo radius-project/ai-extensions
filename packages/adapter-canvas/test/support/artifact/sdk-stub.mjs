@@ -99,6 +99,9 @@ export async function joinSession(declaration) {
 }
 
 export async function assertArtifactPublicationRefusals() {
+  const completeAuthoring = joinedDeclaration?.tools.find(
+    (tool) => tool.name === "radius_complete_app_authoring"
+  );
   const compileExtension = joinedDeclaration?.tools.find(
     (tool) => tool.name === "radius_publish_custom_type_extension"
   );
@@ -111,7 +114,16 @@ export async function assertArtifactPublicationRefusals() {
   const publicationRefusal = await publishRecipe?.handler({
     target: "br:example.invalid/fixture/app/recipe:1"
   });
+  const staleCompletion = await completeAuthoring?.handler({
+    requestToken: "expired-artifact-fixture",
+    outcome: "complete"
+  });
+  const staleCompilation = await compileExtension?.handler({
+    requestToken: "expired-artifact-fixture"
+  });
   if (
+    staleCompletion?.kind !== "refused" ||
+    !String(staleCompilation).includes("Unknown or expired") ||
     !String(compilationRefusal).startsWith(
       "⚠️ Could not publish the custom-type extension:"
     ) ||

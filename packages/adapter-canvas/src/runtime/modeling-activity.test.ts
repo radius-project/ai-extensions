@@ -21,6 +21,33 @@ const WORKSPACE = {
 };
 
 describe("observeWorkspaceModelingRun", () => {
+  it.each([true, false])(
+    "counts stage activity only if its owner survives the read (%s)",
+    async (survives) => {
+      let liveStage: string | undefined =
+        "/workspace/.radius/.staging-managed-fixture";
+      const read = vi.fn(async (_path, stage?: string) => {
+        if (!survives) liveStage = undefined;
+        return stage ? 42 : null;
+      });
+      await expect(
+        observeWorkspaceModelingRun(
+          "a/b",
+          ["feat"],
+          WORKSPACE,
+          read,
+          () => liveStage
+        )
+      ).resolves.toBe(survives ? 42 : null);
+      expect(read).toHaveBeenNthCalledWith(
+        1,
+        "/workspace",
+        "/workspace/.radius/.staging-managed-fixture"
+      );
+      if (!survives) expect(read).toHaveBeenNthCalledWith(2, "/workspace");
+    }
+  );
+
   it("probes workspace staging activity when the repository and one requested branch match", async () => {
     const probe = vi.fn(async () => 42);
 
@@ -109,6 +136,18 @@ describe("createModelingActivity", () => {
 
     expect(await activity.inFlight("a/b", ["feat"])).toBe(false);
     expect(await activity.inFlight("a/b", ["main"])).toBe(true);
+  });
+
+  it("does not erase a replacement announcement made at the same clock tick", async () => {
+    const { activity } = harness();
+    const target = { repo: "a/b", branch: "feat" };
+    const releaseFirst = activity.announce(target);
+    const releaseReplacement = activity.announce(target);
+
+    releaseFirst();
+    expect(await activity.inFlight("a/b", ["feat"])).toBe(true);
+    releaseReplacement();
+    expect(await activity.inFlight("a/b", ["feat"])).toBe(false);
   });
 
   it("does not let one repo's announcement silence another repo or branch", async () => {

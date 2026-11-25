@@ -1,9 +1,11 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { serializeAppOrigin } from "@radius-project/core";
 // The staging rules are core's specification for the bundled script, not part
 // of the package's public surface, so they are imported from the modeling
@@ -20,6 +22,11 @@ import {
   publishableFiles
 } from "@radius-project/core/modeling";
 import { hashAppBicep } from "./app-bicep-hash.js";
+import {
+  beginManagedRun,
+  type ManagedModelStaging
+} from "../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
+import { createDeferred } from "../test/support/browser/fakes.js";
 
 // The promote script ships inside the installed plugin, where the workspace
 // packages are unavailable, so it re-implements the rules that
@@ -85,9 +92,10 @@ function repo(existingModel?: string): Repo {
 
 function run(
   cwd: string,
-  args: string[]
+  args: string[],
+  nodeArgs: string[] = []
 ): { status: number; stdout: string; stderr: string } {
-  const result = spawnSync(process.execPath, [script, ...args], {
+  const result = spawnSync(process.execPath, [...nodeArgs, script, ...args], {
     cwd,
     encoding: "utf8"
   });
@@ -154,6 +162,658 @@ function gitStatus(root: string): string[] {
     .split("\n")
     .filter(Boolean);
 }
+
+function allowPromotion(): void {}
+
+async function preparePromotion(): Promise<void> {}
+
+function promote(managed: ManagedModelStaging) {
+  return managed.promote(preparePromotion, allowPromotion);
+}
+
+it("reports incomplete standalone rollback and refuses to discard or reuse its backups", () => {
+  const target = repo("original model");
+  const stagingDir = begin(target);
+  stageCompleteRun(stagingDir);
+  const injectRenameFailures = `
+    import fs from "node:fs";
+    import path from "node:path";
+    import { syncBuiltinESMExports } from "node:module";
+    const config = path.resolve(".radius", "bicepconfig.json");
+    const stage = process.argv[process.argv.indexOf("--staging") + 1];
+    const rename = fs.renameSync;
+    fs.renameSync = (from, to) => {
+      if (to === config && path.dirname(from) === stage) {
+        throw new Error("config rename failed: " + path.basename(from));
+      }
+      rename(from, to);
+    };
+    syncBuiltinESMExports();
+  `;
+  const result = run(
+    target.root,
+    ["--staging", stagingDir],
+    [
+      "--import",
+      `data:text/javascript,${encodeURIComponent(injectRenameFailures)}`
+    ]
+  );
+  expect(result.status, result.stderr).toBe(3);
+  expect(result.stderr).toContain("rollback was incomplete");
+  expect(result.stderr).toContain(`Recovery files remain at ${stagingDir}`);
+  const backup = path.join(stagingDir, "bicepconfig.json.published-backup");
+  expect(fs.readFileSync(backup, "utf8")).toBe(CONFIG);
+
+  for (const flags of [["--abort"], []]) {
+    const retry = run(target.root, [...flags, "--staging", stagingDir]);
+    expect(retry.status, retry.stderr).toBe(3);
+    expect(retry.stderr).toContain(`Recovery files remain at ${stagingDir}`);
+    expect(fs.readFileSync(backup, "utf8")).toBe(CONFIG);
+  }
+  expect(
+    fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
+  ).toBe("original model");
+  expect(stagedInGit(target.root)).toEqual([]);
+});
+
+describe("managed staging", () => {
+  it.each([false, true])(
+    "keeps the validation copy only when promotion rollback is incomplete (restore fails: %s)",
+    async (failRestore) => {
+      const target = repo("original model");
+      const managed = beginManagedRun(target.root);
+      stageCompleteRun(managed.stagingDir);
+      let copy = "";
+      await managed.validate(async (app) => {
+        copy = path.dirname(app);
+      });
+
+      const config = path.join(target.radiusDir, "bicepconfig.json");
+      const backup = path.join(copy, "bicepconfig.json.published-backup");
+      const rename = fs.renameSync;
+      const renameSpy = vi
+        .spyOn(fs, "renameSync")
+        .mockImplementation((from, to) => {
+          if (to === config && from === path.join(copy, "bicepconfig.json")) {
+            throw new Error("could not promote config");
+          }
+          if (failRestore && from === backup && to === config) {
+            throw new Error("could not restore config");
+          }
+          rename(from, to);
+        });
+      syncBuiltinESMExports();
+      try {
+        await expect(promote(managed)).rejects.toThrow(
+          failRestore ?
+            `Recovery files remain at ${copy}`
+          : "every file was put back"
+        );
+      } finally {
+        renameSpy.mockRestore();
+        syncBuiltinESMExports();
+      }
+
+      managed.cancel();
+      expect(
+        fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
+      ).toBe("original model");
+      expect(stagedInGit(target.root)).toEqual([]);
+      if (failRestore) {
+        expect(fs.readFileSync(backup, "utf8")).toBe(CONFIG);
+        expect(fs.existsSync(config)).toBe(false);
+        expect(gitStatus(target.root)).toEqual(["D .radius/bicepconfig.json"]);
+      } else {
+        expect(fs.existsSync(copy)).toBe(false);
+        expect(fs.readFileSync(config, "utf8")).toBe(CONFIG);
+        expect(gitStatus(target.root)).toEqual([]);
+      }
+    }
+  );
+
+  it("refuses a non-regular baseline or staged recipe without publishing", async () => {
+    const target = repo();
+    const config = path.join(target.radiusDir, "bicepconfig.json");
+    fs.mkdirSync(config);
+    const managed = beginManagedRun(target.root);
+    expect(() => managed.assertBaseline()).toThrow("bicepconfig.json");
+    stageCompleteRun(managed.stagingDir);
+    fs.mkdirSync(path.join(managed.stagingDir, "fixture-recipe.bicep"));
+    await expect(managed.validate(async () => {})).rejects.toThrow(
+      "fixture-recipe.bicep"
+    );
+    expect(fs.existsSync(path.join(target.radiusDir, "app.bicep"))).toBe(false);
+  });
+
+  it("does not treat a failed open as absence when the baseline entry exists", () => {
+    const target = repo("original model");
+    const config = path.join(target.radiusDir, "bicepconfig.json");
+    const open = fs.openSync;
+    const openSpy = vi
+      .spyOn(fs, "openSync")
+      .mockImplementation((file, ...args) => {
+        if (file === config) {
+          throw Object.assign(new Error("Cannot open existing config"), {
+            code: "ENOENT"
+          });
+        }
+        return open(file, ...args);
+      });
+    syncBuiltinESMExports();
+    try {
+      const managed = beginManagedRun(target.root);
+      expect(() => managed.assertBaseline()).toThrow(
+        "Cannot verify the managed model baseline: bicepconfig.json"
+      );
+    } finally {
+      openSpy.mockRestore();
+      syncBuiltinESMExports();
+    }
+    expect(fs.readFileSync(config, "utf8")).toBe(CONFIG);
+  });
+
+  it("validates an ignored managed copy and publishes only its validated outputs", async () => {
+    const target = repo();
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    fs.writeFileSync(
+      path.join(managed.stagingDir, "resolved-types.json"),
+      "{}\n"
+    );
+    let copy = "";
+    await managed.validate(async (app) => {
+      copy = path.dirname(app);
+      expect(copy).not.toBe(managed.stagingDir);
+      expect(path.dirname(copy)).toBe(target.radiusDir);
+      expect(path.basename(copy)).toMatch(/^\.staging-managed-/u);
+      expect(stagedNames(copy)).toEqual(
+        expect.arrayContaining([
+          "app.bicep",
+          "app.origin.json",
+          "bicepconfig.json",
+          "run.json",
+          "resolved-types.json",
+          ".gitignore"
+        ])
+      );
+      expect(fs.readFileSync(path.join(copy, ".gitignore"), "utf8")).toBe(
+        "*\n"
+      );
+    });
+    await expect(promote(managed)).resolves.toMatchObject({ gitError: "" });
+    expect(
+      fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
+    ).toBe(MODEL);
+    expect(
+      fs.existsSync(path.join(target.radiusDir, "resolved-types.json"))
+    ).toBe(false);
+    expect(fs.existsSync(copy)).toBe(false);
+    expect(fs.existsSync(managed.stagingDir)).toBe(false);
+  });
+
+  it("keeps validator inputs until settlement and preserves them if exit is unconfirmed", async () => {
+    const target = repo();
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    const app = createDeferred<string>();
+    const stopped = createDeferred<void>();
+    const error = new Error("local process exit unconfirmed");
+    const validating = managed.validate(
+      async (file) => {
+        app.resolve(file);
+        await stopped.promise;
+      },
+      (failure) => failure === error
+    );
+    const result = expect(validating).rejects.toThrow(
+      "Validation cleanup is incomplete"
+    );
+    const copy = await app.promise;
+    managed.cancel();
+    expect(fs.existsSync(copy)).toBe(true);
+    stopped.reject(error);
+    await result;
+    expect(fs.existsSync(copy)).toBe(true);
+  });
+
+  it("checks the observed root model and absent origin at both admission and commit", async () => {
+    const target = repo();
+    const model = path.join(target.root, "app.bicep");
+    fs.writeFileSync(model, MODEL);
+    const observed = [
+      {
+        path: "app.bicep",
+        hash: createHash("sha256").update(MODEL).digest("hex")
+      },
+      { path: "app.origin.json", hash: null },
+      { path: ".radius/app.bicep", hash: null }
+    ];
+    fs.writeFileSync(model, "saved edit");
+    expect(() => beginManagedRun(target.root, observed)).toThrow("app.bicep");
+    fs.writeFileSync(model, MODEL);
+    const managed = beginManagedRun(target.root, observed);
+    stageCompleteRun(managed.stagingDir);
+    await managed.validate(async () => {});
+    await expect(
+      managed.promote(async () => {
+        fs.writeFileSync(path.join(target.root, "app.origin.json"), "{}");
+      }, allowPromotion)
+    ).rejects.toThrow("app.origin.json");
+    expect(fs.readFileSync(model, "utf8")).toBe(MODEL);
+    expect(fs.existsSync(path.join(target.radiusDir, "app.bicep"))).toBe(false);
+  });
+
+  it("promotes a legacy root refresh without changing the root model or origin", async () => {
+    const target = repo();
+    const definition = path.join(target.root, "app.bicep");
+    const origin = path.join(target.root, "app.origin.json");
+    fs.writeFileSync(definition, "previous model");
+    fs.writeFileSync(origin, "{}");
+    const hash = (text: string) =>
+      createHash("sha256").update(text).digest("hex");
+    const managed = beginManagedRun(target.root, [
+      { path: "app.bicep", hash: hash("previous model") },
+      { path: "app.origin.json", hash: hash("{}") },
+      { path: ".radius/app.bicep", hash: null },
+      { path: ".radius/app.origin.json", hash: null }
+    ]);
+    stageCompleteRun(managed.stagingDir);
+    await managed.validate(async () => {});
+    await managed.promote(async () => {}, allowPromotion);
+    expect(fs.readFileSync(definition, "utf8")).toBe("previous model");
+    expect(fs.readFileSync(origin, "utf8")).toBe("{}");
+    expect(
+      fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
+    ).toBe(MODEL);
+  });
+
+  it("ignores staged and generated graph writes but detects edits to saved model outputs", () => {
+    const target = repo("original");
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    fs.writeFileSync(path.join(target.radiusDir, "app-graph.json"), "{}");
+    expect(() => managed.assertBaseline()).not.toThrow();
+
+    fs.writeFileSync(path.join(target.radiusDir, "app.bicep"), "user edit");
+    fs.writeFileSync(
+      path.join(target.radiusDir, "postgres-recipe.bicep"),
+      "new recipe"
+    );
+
+    expect(() => managed.assertBaseline()).toThrow(
+      "Managed model files changed while modeling: app.bicep, postgres-recipe.bicep"
+    );
+    expect(stagedInGit(target.root)).toEqual([]);
+  });
+
+  it("refuses publication admission if a previous model output cannot be fingerprinted", () => {
+    const target = repo("original");
+    fs.mkdirSync(path.join(target.radiusDir, "custom-types.yaml"));
+    const managed = beginManagedRun(target.root);
+
+    expect(() => managed.assertBaseline()).toThrow(
+      "Cannot verify the managed model baseline: custom-types.yaml"
+    );
+  });
+
+  it("allows only direct, single-link publication files within the current staging directory", () => {
+    const managed = beginManagedRun(repo().root);
+    const manifest = path.join(managed.stagingDir, "custom-types.yaml");
+    const output = path.join(managed.stagingDir, "custom-types.tgz");
+    expect(() => managed.artifact("custom-types.yaml", true)).toThrow(
+      "regular"
+    );
+    expect(() => managed.artifact("../custom-types.tgz", false)).toThrow(
+      "direct"
+    );
+    expect(managed.artifact("custom-types.tgz", false)).toBe(output);
+    fs.writeFileSync(manifest, "fixture manifest");
+    expect(managed.artifact("custom-types.yaml", true)).toBe(manifest);
+    fs.linkSync(manifest, output);
+    expect(() => managed.artifact("custom-types.tgz", false)).toThrow(
+      "regular"
+    );
+    managed.cancel();
+    expect(() => managed.artifact("custom-types.yaml", true)).toThrow(
+      "no longer active"
+    );
+  });
+
+  it("reserves managed IDs and refuses standalone publication and abort", async () => {
+    const target = repo();
+    const reserved = run(target.root, ["--begin", "--run-id", "Managed-test"]);
+    expect(reserved.status).toBe(1);
+    expect(reserved.stderr).toContain("reserved for the runtime");
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    for (const args of [[], ["--abort"]]) {
+      const result = run(target.root, [
+        ...args,
+        "--staging",
+        managed.stagingDir
+      ]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Only the runtime that started");
+      expect(fs.existsSync(managed.stagingDir)).toBe(true);
+    }
+    expect(radiusSnapshot(target.radiusDir)).toEqual({});
+    expect(stagedInGit(target.root)).toEqual([]);
+    await managed.validate(async (app) => {
+      expect(fs.readFileSync(app, "utf8")).toBe(MODEL);
+    });
+    await expect(promote(managed)).resolves.toEqual({
+      published: REQUIRED_STAGED_FILES.map((file) =>
+        path.join(target.radiusDir, file)
+      ),
+      gitError: ""
+    });
+    expect(stagedInGit(target.root)).toContain(".radius/app.bicep");
+    await expect(promote(managed)).rejects.toThrow("no longer active");
+  });
+
+  it("rejects canceled work without removing a successor's staging or changing the index", async () => {
+    const target = repo();
+    const predecessor = beginManagedRun(target.root);
+    predecessor.cancel();
+    const successor = beginManagedRun(target.root);
+    stageCompleteRun(predecessor.stagingDir);
+    stageCompleteRun(successor.stagingDir);
+    await expect(promote(predecessor)).rejects.toThrow("no longer active");
+    expect(radiusSnapshot(target.radiusDir)).toEqual({});
+    expect(stagedInGit(target.root)).toEqual([]);
+    await successor.validate(async () => {});
+    await expect(promote(successor)).resolves.toMatchObject({
+      gitError: ""
+    });
+    expect(fs.existsSync(predecessor.stagingDir)).toBe(true);
+  });
+
+  it("rolls back a managed promotion when the staging ignore rule cannot be written", async () => {
+    const target = repo("original");
+    const ignore = path.join(target.radiusDir, ".gitignore");
+    fs.mkdirSync(ignore);
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    await managed.validate(async () => {});
+
+    await expect(promote(managed)).rejects.toThrow(
+      /Publishing the application model failed partway.*\.gitignore/
+    );
+    expect(
+      fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
+    ).toBe("original");
+    expect(fs.statSync(ignore).isDirectory()).toBe(true);
+    expect(fs.existsSync(path.join(target.radiusDir, "app.origin.json"))).toBe(
+      false
+    );
+    expect(stagedInGit(target.root)).toEqual([]);
+  });
+
+  it("awaits discovery before checking admission and indexes only after the filesystem commit", async () => {
+    const target = repo("original");
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    await managed.validate(async () => {});
+    const discovery = createDeferred<string>();
+    const preparation = createDeferred<void>();
+    const startedPreparation = createDeferred<void>();
+    const indexing = createDeferred<void>();
+    const startedIndexing = createDeferred<{
+      root: string;
+      files: string[];
+      events: string[];
+      model: string;
+      stagingExists: boolean;
+    }>();
+    const app = path.join(target.radiusDir, "app.bicep");
+    const events: string[] = [];
+    const promotion = managed.promote(
+      () => {
+        events.push("prepare");
+        startedPreparation.resolve();
+        return preparation.promise;
+      },
+      () => {
+        expect(fs.readFileSync(app, "utf8")).toBe("original");
+        events.push("admit");
+      },
+      {
+        onFilesystemCommitted() {
+          expect(fs.readFileSync(app, "utf8")).toBe(MODEL);
+          events.push("commit");
+        },
+        gitPorts: {
+          discoverRepositoryRoot: (directory) => {
+            expect(directory).toBe(target.radiusDir);
+            events.push("discover");
+            return discovery.promise;
+          },
+          stageFiles: (root, files) => {
+            startedIndexing.resolve({
+              root,
+              files,
+              events: [...events],
+              model: fs.readFileSync(app, "utf8"),
+              stagingExists: fs.existsSync(managed.stagingDir)
+            });
+            return indexing.promise;
+          }
+        }
+      }
+    );
+
+    expect(events).toEqual(["discover"]);
+    expect(fs.readFileSync(app, "utf8")).toBe("original");
+    discovery.resolve(target.root);
+    await startedPreparation.promise;
+    expect(events).toEqual(["discover", "prepare"]);
+    expect(fs.readFileSync(app, "utf8")).toBe("original");
+    preparation.resolve();
+    expect(await startedIndexing.promise).toEqual({
+      root: target.root,
+      files: [
+        ...REQUIRED_STAGED_FILES.map((file) =>
+          path.join(target.radiusDir, file)
+        ),
+        path.join(target.radiusDir, ".gitignore")
+      ],
+      events: ["discover", "prepare", "admit", "commit"],
+      model: MODEL,
+      stagingExists: false
+    });
+    indexing.reject(new Error("index is locked"));
+    await expect(promotion).resolves.toMatchObject({
+      gitError: "index is locked"
+    });
+    expect(fs.readFileSync(app, "utf8")).toBe(MODEL);
+    expect(stagedInGit(target.root)).toEqual([]);
+  });
+
+  it.each(["preparation", "final admission"])(
+    "does not commit or index when %s refuses promotion after discovery",
+    async (rejection) => {
+      const target = repo("original");
+      const managed = beginManagedRun(target.root);
+      stageCompleteRun(managed.stagingDir);
+      await managed.validate(async () => {});
+      const discovery = createDeferred<string>();
+      const promotion = managed.promote(
+        async () => {
+          if (rejection === "preparation") throw new Error("request changed");
+        },
+        () => {
+          if (rejection === "final admission")
+            throw new Error("request changed");
+        },
+        {
+          gitPorts: {
+            discoverRepositoryRoot: () => discovery.promise,
+            stageFiles: () => {
+              throw new Error("unexpected indexing");
+            }
+          }
+        }
+      );
+
+      discovery.resolve(target.root);
+      await expect(promotion).rejects.toThrow("request changed");
+      expect(
+        fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
+      ).toBe("original");
+      expect(stagedInGit(target.root)).toEqual([]);
+    }
+  );
+
+  it("preserves a user edit made while Git discovers the repository", async () => {
+    const target = repo("original");
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    await managed.validate(async () => {});
+    const app = path.join(target.radiusDir, "app.bicep");
+    const discovery = createDeferred<string>();
+    const promotion = managed.promote(
+      async () => managed.assertBaseline(),
+      () => managed.assertBaseline(),
+      {
+        gitPorts: {
+          discoverRepositoryRoot: () => discovery.promise,
+          stageFiles: () => {
+            throw new Error("unexpected indexing");
+          }
+        }
+      }
+    );
+
+    fs.writeFileSync(app, "user edit");
+    discovery.resolve(target.root);
+    await expect(promotion).rejects.toThrow("changed while modeling");
+    expect(fs.readFileSync(app, "utf8")).toBe("user edit");
+    expect(stagedInGit(target.root)).toEqual([]);
+  });
+
+  it("preserves the filesystem commit but skips indexing when discovery fails", async () => {
+    const target = repo();
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    await managed.validate(async () => {});
+    const result = await managed.promote(preparePromotion, allowPromotion, {
+      gitPorts: {
+        discoverRepositoryRoot: async () => {
+          throw Object.assign(new Error("rev-parse failed"), {
+            stderr: "not a git repository\n"
+          });
+        },
+        stageFiles: () => {
+          throw new Error("unexpected indexing");
+        }
+      }
+    });
+
+    expect(result.gitError).toBe("not a git repository");
+    expect(
+      fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
+    ).toBe(MODEL);
+    expect(stagedInGit(target.root)).toEqual([]);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "preserves an existing staging ignore file's permissions despite the process umask",
+    () => {
+      const target = repo();
+      const ignore = path.join(target.radiusDir, ".gitignore");
+      fs.writeFileSync(ignore, "*.tmp\n");
+      fs.chmodSync(ignore, 0o664);
+      const stagingDir = begin(target);
+      stageCompleteRun(stagingDir);
+
+      const result = run(
+        target.root,
+        ["--staging", stagingDir],
+        ["--import", "data:text/javascript,process.umask(0o022)"]
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(fs.readFileSync(ignore, "utf8")).toBe("*.tmp\n.staging-*/\n");
+      expect(fs.statSync(ignore).mode & 0o777).toBe(0o664);
+      expect(stagedInGit(target.root)).toContain(".radius/.gitignore");
+    }
+  );
+
+  it("uses its initial baseline even if staged bookkeeping is modified", async () => {
+    const target = repo("original");
+    const managed = beginManagedRun(target.root);
+    const app = path.join(target.radiusDir, "app.bicep");
+    fs.writeFileSync(app, "user edit");
+    stageCompleteRun(managed.stagingDir);
+    fs.writeFileSync(
+      path.join(managed.stagingDir, STAGING_RUN_RECORD),
+      JSON.stringify({ baseline: {} })
+    );
+    await managed.validate(async () => {});
+    await expect(promote(managed)).rejects.toThrow("changed while modeling");
+    expect(fs.readFileSync(app, "utf8")).toBe("user edit");
+    expect(stagedInGit(target.root)).toEqual([]);
+  });
+
+  it("protects a recipe that appeared after the run began", async () => {
+    const target = repo();
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    const recipe = "postgres-recipe.bicep";
+    fs.writeFileSync(path.join(managed.stagingDir, recipe), "generated recipe");
+    const existing = path.join(target.radiusDir, recipe);
+    fs.writeFileSync(existing, "user recipe");
+    await managed.validate(async () => {});
+    await expect(promote(managed)).rejects.toThrow("changed while modeling");
+    expect(fs.readFileSync(existing, "utf8")).toBe("user recipe");
+    expect(stagedInGit(target.root)).toEqual([]);
+  });
+
+  it("rejects a replaced staging directory without deleting the replacement", async () => {
+    const target = repo();
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    await managed.validate(async () => {});
+    await expect(
+      managed.promote(async () => {
+        fs.renameSync(managed.stagingDir, `${managed.stagingDir}-abandoned`);
+        fs.mkdirSync(managed.stagingDir);
+        stageCompleteRun(managed.stagingDir);
+      }, allowPromotion)
+    ).rejects.toThrow("directory or its parent changed");
+    expect(stagedNames(managed.stagingDir)).toContain("app.bicep");
+    expect(radiusSnapshot(target.radiusDir)).toEqual({});
+  });
+
+  it("refuses to promote a config replaced during asynchronous preparation", async () => {
+    const target = repo();
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    await managed.validate(async () => {});
+    await expect(
+      managed.promote(async () => {
+        fs.writeFileSync(
+          path.join(managed.stagingDir, "bicepconfig.json"),
+          "{}\n"
+        );
+      }, allowPromotion)
+    ).rejects.toThrow("changed afterward");
+    expect(radiusSnapshot(target.radiusDir)).toEqual({});
+    expect(stagedInGit(target.root)).toEqual([]);
+  });
+
+  it("rejects changes the validator itself observed during a run", async () => {
+    const target = repo();
+    const managed = beginManagedRun(target.root);
+    stageCompleteRun(managed.stagingDir);
+    await expect(
+      managed.validate(async (app) => {
+        fs.appendFileSync(app, "// changed\n");
+      })
+    ).rejects.toThrow("changed while Radius was validating");
+    await expect(promote(managed)).rejects.toThrow("not passed validation");
+    expect(radiusSnapshot(target.radiusDir)).toEqual({});
+  });
+});
 
 describe("--begin", () => {
   it("creates a staging directory inside .radius and prints it", () => {
@@ -674,18 +1334,28 @@ describe("publish", () => {
     expect(stagedInGit(target.root)).toEqual([]);
   });
 
-  it("reports a distinct status when the files are published but not staged", () => {
-    const target = repo();
-    const stagingDir = begin(target);
-    stageCompleteRun(stagingDir);
-    fs.rmSync(path.join(target.root, ".git"), { recursive: true, force: true });
+  it.each(["repository discovery", "index update"])(
+    "reports a distinct status when %s fails after publishing the files",
+    (failure) => {
+      const target = repo();
+      const stagingDir = begin(target);
+      stageCompleteRun(stagingDir);
+      const metadata = path.join(target.root, ".git");
+      if (failure === "repository discovery") {
+        fs.rmSync(metadata, { recursive: true, force: true });
+      } else {
+        fs.writeFileSync(path.join(metadata, "index.lock"), "");
+      }
 
-    const result = run(target.root, ["--staging", stagingDir]);
+      const result = run(target.root, ["--staging", stagingDir]);
 
-    expect(result.status).toBe(2);
-    expect(result.stderr).toContain("NOT staged");
-    expect(fs.existsSync(path.join(target.radiusDir, "app.bicep"))).toBe(true);
-  });
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("NOT staged");
+      expect(fs.existsSync(path.join(target.radiusDir, "app.bicep"))).toBe(
+        true
+      );
+    }
+  );
 
   // Confinement is not lexical only: a symlink named like a staging directory
   // must never be followed, written through, or published from. The

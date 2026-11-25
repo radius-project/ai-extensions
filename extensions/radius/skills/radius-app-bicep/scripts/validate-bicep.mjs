@@ -1658,6 +1658,15 @@ async function check(app, staged) {
 async function main() {
   const app = path.resolve(process.argv[2] || ".radius/app.bicep");
   const run = readRunRecord(app);
+  if (process.argv[3] === "--managed-final") {
+    const { isManagedRun } = await import("./app-model-staging.mjs");
+    if (!isManagedRun(path.dirname(app)) || !run || run.unusable) {
+      console.error("Final validation requires a managed Radius staging run.");
+      return EXIT_CHECK_UNAVAILABLE;
+    }
+    // Completion owns this separate final check, not the agent's repair budget.
+    return await check(app, true);
+  }
   if (run === null) {
     return await check(app, false);
   }

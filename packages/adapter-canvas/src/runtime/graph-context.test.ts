@@ -271,6 +271,32 @@ describe("resolveAppModelStatus", () => {
     expect(status.freshness.status).toBe("up-to-date");
   });
 
+  it("refuses legacy model refresh when the origin baseline cannot be read", async () => {
+    const { resolveAppModelStatus, deps } = helpers();
+    vi.mocked(deps.graphSources.read).mockImplementation(async (request) => ({
+      status: "present",
+      content: MODEL,
+      source: {
+        kind: "workspace",
+        repo: request.repo,
+        ref: request.ref,
+        definitionPath: "app.bicep",
+        workspacePath: "/workspace"
+      }
+    }));
+    vi.mocked(deps.graphSources.readFile).mockImplementation(
+      async (source) => ({
+        status: "unavailable",
+        source,
+        diagnostic: "origin metadata unavailable"
+      })
+    );
+
+    await expect(
+      resolveAppModelStatus("acme/widgets", "main", WORKSPACE_STATE)
+    ).rejects.toThrow("origin metadata unavailable");
+  });
+
   it("reports a generator upgrade against the installed version", async () => {
     const { resolveAppModelStatus } = helpers({
       generatorVersion: "0.2.0",

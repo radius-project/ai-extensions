@@ -18,6 +18,34 @@ const validationError = (
 const WS = path.join(os.tmpdir(), "ws");
 const RADIUS = path.join(WS, ".radius");
 
+test("standalone publication refuses managed staging paths, including aliases", () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "managed-publication-"));
+  try {
+    const managed = path.join(ws, ".radius", ".staging-managed-fixture");
+    fs.mkdirSync(managed, { recursive: true });
+    fs.symlinkSync(managed, path.join(ws, ".radius", "alias"), "junction");
+    assert.throws(
+      () => resolveStagingDirPrefix(ws, ".staging-managed-fixture"),
+      /request token/
+    );
+    assert.throws(
+      () =>
+        resolveExistingRadiusArtifact(
+          ws,
+          ".staging-managed-fixture/example-recipe.bicep",
+          null
+        ),
+      /request token/
+    );
+    assert.throws(
+      () => resolveRadiusArtifactTarget(ws, "alias/custom-types.tgz", null),
+      /request token/
+    );
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test("resolveRadiusArtifactTarget confines relative paths under .radius/", () => {
   assert.equal(
     resolveRadiusArtifactTarget(WS, "custom-types.yaml", null),
@@ -56,6 +84,31 @@ test("resolveRadiusArtifactTarget verifies the nearest existing parent for a new
         null
       ),
       path.join(ws, ".radius", "existing", "new", "deeper", "custom-types.tgz")
+    );
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("resolves new compiler targets below an in-tree junction to the same writer path", () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "radius-output-alias-"));
+  try {
+    const root = path.join(ws, ".radius");
+    const output = path.join(root, "output");
+    fs.mkdirSync(output, { recursive: true });
+    fs.symlinkSync(output, path.join(root, "alias"), "junction");
+    const canonical = resolveRadiusArtifactTarget(
+      ws,
+      "output/new/types.tgz",
+      null
+    );
+    assert.equal(
+      canonical,
+      path.join(fs.realpathSync(output), "new", "types.tgz")
+    );
+    assert.equal(
+      resolveRadiusArtifactTarget(ws, "alias/new/types.tgz", null),
+      canonical
     );
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });

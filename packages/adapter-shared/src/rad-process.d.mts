@@ -23,6 +23,14 @@ export interface SpawnRadOptions {
   env?: NodeJS.ProcessEnv;
   timeout?: number;
   label?: string;
+  /** Cancellation and timeout drain before rejection when a signal is supplied. */
+  signal?: AbortSignal;
+  /**
+   * Drain before rejecting on timeout, even without a signal. On Windows,
+   * cancellation or a draining timeout rejects with
+   * RadProcessExitUnconfirmedError if tree exit is unconfirmed.
+   */
+  drainOnTimeout?: boolean;
 }
 
 // bicepPath is required: this low-level helper has no default, so omitting it
@@ -38,12 +46,18 @@ export class RadProcessError extends Error {
   constructor(message: string, stdout: string, stderr: string);
 }
 
+export class RadProcessExitUnconfirmedError extends RadProcessError {}
+
+/** Detects an unconfirmed exit through Error.cause wrappers. */
+export function isRadProcessExitUnconfirmed(error: unknown): boolean;
+
 export function windowsTaskkillPath(env?: NodeJS.ProcessEnv): string;
 
+/** A Windows cleanup resolves false if taskkill could not confirm tree exit. */
 export function killChildTree(
   child: ChildProcessLike | null | undefined,
   platform?: NodeJS.Platform
-): void;
+): Promise<boolean> | undefined;
 
 export function radSpawnOptions(platform?: NodeJS.Platform): RadSpawnOptions;
 

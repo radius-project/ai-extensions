@@ -97,12 +97,16 @@ export interface RadDependencies {
     fromFile: string;
     target: string;
     log?: (message: string) => void;
+    prepareSpawn?: () => Promise<void>;
+    beforeSpawn?: () => void;
   }): Promise<unknown>;
   runRadBicepPublish(options: {
     file: string;
     target: string;
     env?: Record<string, string>;
     log?: (message: string) => void;
+    prepareSpawn?: () => Promise<void>;
+    beforeSpawn?: () => void;
   }): Promise<unknown>;
 }
 
@@ -169,6 +173,14 @@ export interface PublishTargetsDependencies {
 }
 
 export interface HostCallbackDependencies {
+  setAuthoringLifecycle(lifecycle: {
+    liveStage(
+      state: CanvasState,
+      repo: string,
+      branches: readonly string[]
+    ): string | undefined;
+    selectionChanged(state: CanvasState): void;
+  }): void;
   setAppBicepHandoff(
     fn: (input: {
       repo: string;
@@ -222,10 +234,20 @@ export interface HostCallbackDependencies {
 
 export interface ProcessDependencies {
   existsSync(path: string): boolean;
+  runValidator(
+    cmd: string,
+    args: string[],
+    options: {
+      cwd: string;
+      timeout: number;
+      signal: AbortSignal;
+      label: string;
+    }
+  ): Promise<{ stdout: string; stderr: string }>;
   execFile(
     cmd: string,
     args: string[],
-    options: { timeout?: number; encoding?: BufferEncoding }
+    options: { cwd?: string; timeout?: number; encoding?: BufferEncoding }
   ): Promise<{ stdout: string; stderr: string }>;
 }
 
@@ -273,7 +295,8 @@ export interface AppModelDependencies {
   // it publishes or aborts. Consumers must apply an inactivity limit because
   // an interrupted run can leave its staging directory behind.
   modelingRunLastActivityAtMs(
-    workspacePath: string | null | undefined
+    workspacePath: string | null | undefined,
+    liveManagedStage?: string
   ): Promise<number | null>;
   // Repo-relative file read from the local worktree, when the selection is it.
   fetchWorkspaceFile(
@@ -326,6 +349,7 @@ export interface RadiusExtensionDependencies {
   process: ProcessDependencies;
   operations: OperationsDependencies;
   appModel: AppModelDependencies;
+  beginManagedModel: typeof import("../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs").beginManagedRun;
   radiusAppBicepSkill(repoPath?: string, brief?: string): string;
   renderPrDiffMarkdown(
     resources: CanvasGraphResource[],

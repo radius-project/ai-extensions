@@ -30,6 +30,7 @@ import {
   resolveInstalledRadiusVersion,
   runRadBicepPublishExtension,
   runRadBicepPublish,
+  spawnRad,
   createDeploymentRepository,
   createGraphSourceBindings
 } from "@radius-project/adapter-shared";
@@ -74,7 +75,6 @@ import { createProductionDeploymentRuntime } from "./runtime/production-deployme
 import { createDeployModelSource } from "./server/services/deploy-model-source.js";
 import {
   getSourceRefResources,
-  prepareSourceRefResources,
   setSourceRefResources,
   updateSourceRefs
 } from "./source-refs.js";
@@ -92,6 +92,7 @@ import {
 import { configureCredentialProvenanceStore } from "./credential-provenance.js";
 import { createFileCredentialProvenanceStore } from "./credential-provenance-store.js";
 import { radiusAppBicepSkill } from "./skill.js";
+import { beginManagedRun } from "../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
 import { createGeneratorVersionReader } from "./generator-version.js";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.js";
 import { withGhcrDockerConfig } from "./ghcr.js";
@@ -166,7 +167,9 @@ const {
   getOrCreateServer,
   stopServer,
   getLastWebviewActivityAt,
-  environmentServices
+  environmentServices,
+  prepareGraphSelection,
+  setAuthoringLifecycle
 } = createProductionCanvasServerRuntime({
   executionOwner,
   accountContext,
@@ -247,7 +250,7 @@ const dependencies: RadiusExtensionDependencies = {
   },
   sourceRefs: {
     getSourceRefResources,
-    prepareSourceRefResources,
+    prepareSourceRefResources: prepareGraphSelection,
     setSourceRefResources,
     updateSourceRefs
   },
@@ -259,12 +262,14 @@ const dependencies: RadiusExtensionDependencies = {
   },
   hostCallbacks: {
     setAppBicepHandoff,
+    setAuthoringLifecycle,
     setDeployRepairHandoff: deploymentRuntime.setDeployRepairHandoff,
     setDeployFailureNotice: deploymentRuntime.setDeployFailureNotice,
     setSessionPromptHandler,
     setOpenSourceHandler
   },
   process: {
+    runValidator: spawnRad,
     existsSync,
     execFile: (cmd, args, options) => execFileAsync(cmd, args, options)
   },
@@ -285,6 +290,7 @@ const dependencies: RadiusExtensionDependencies = {
       fetchFileFromRepo(repo, repoPath, branch)
   },
   radiusAppBicepSkill,
+  beginManagedModel: beginManagedRun,
   renderPrDiffMarkdown,
   withGhcrDockerConfig: (fn) =>
     withGhcrDockerConfig(fn, { ghCommandPresentation })

@@ -60,7 +60,7 @@ export interface ModelingActivityDependencies {
 }
 
 export interface ModelingActivity {
-  announce(announcement: ModelingAnnouncement): void;
+  announce(announcement: ModelingAnnouncement): () => void;
   release(announcement: ModelingAnnouncement): void;
   inFlight(
     repo: string,
@@ -69,13 +69,15 @@ export interface ModelingActivity {
   ): Promise<boolean>;
 }
 
-export function observeWorkspaceModelingRun(
+export async function observeWorkspaceModelingRun(
   repo: string,
   branches: ReadonlyArray<string>,
   workspace: ModelingWorkspace,
   modelingRunLastActivityAtMs: (
-    workspacePath: string | null | undefined
-  ) => Promise<number | null>
+    workspacePath: string | null | undefined,
+    managedStage?: string
+  ) => Promise<number | null>,
+  liveStage?: (workspacePath: string | null | undefined) => string | undefined
 ): Promise<number | null> {
   if (
     !repo ||
@@ -83,9 +85,14 @@ export function observeWorkspaceModelingRun(
     workspace.repo !== repo ||
     !branches.some((branch) => branch === workspace.branch)
   ) {
-    return Promise.resolve(null);
+    return null;
   }
-  return modelingRunLastActivityAtMs(workspace.path);
+  const stage = liveStage?.(workspace.path);
+  if (!stage) return modelingRunLastActivityAtMs(workspace.path);
+  const activity = await modelingRunLastActivityAtMs(workspace.path, stage);
+  return liveStage?.(workspace.path) === stage ?
+      activity
+    : modelingRunLastActivityAtMs(workspace.path);
 }
 
 // Bounds the announcement map. One entry per repo+branch modeled in this
@@ -96,7 +103,7 @@ const ANNOUNCEMENT_LIMIT = 100;
 export function createModelingActivity(
   deps: ModelingActivityDependencies
 ): ModelingActivity {
-  const announcements = new Map<string, number>();
+  const announcements = new Map<string, { atMs: number }>();
   const keyFor = (repo: string, branch: string): string => `${repo}::${branch}`;
 
   // Bounds the map against a pathological caller. Expiry itself is enforced when
@@ -121,18 +128,22 @@ export function createModelingActivity(
       return false;
     }
     return branches.some((branch) => {
-      const atMs = announcements.get(keyFor(repo, branch));
-      return atMs !== undefined && nowMs - atMs < MODELING_ANNOUNCEMENT_TTL_MS;
+      const entry = announcements.get(keyFor(repo, branch));
+      return !!entry && nowMs - entry.atMs < MODELING_ANNOUNCEMENT_TTL_MS;
     });
   };
 
   return {
-    announce({ repo, branch }: ModelingAnnouncement): void {
-      if (!repo || !branch) return;
-      const nowMs = deps.now();
-      announcements.delete(keyFor(repo, branch));
-      announcements.set(keyFor(repo, branch), nowMs);
+    announce({ repo, branch }: ModelingAnnouncement): () => void {
+      if (!repo || !branch) return () => {};
+      const key = keyFor(repo, branch);
+      const entry = { atMs: deps.now() };
+      announcements.delete(key);
+      announcements.set(key, entry);
       trim();
+      return () => {
+        if (announcements.get(key) === entry) announcements.delete(key);
+      };
     },
 
     release({ repo, branch }: ModelingAnnouncement): void {

@@ -156,6 +156,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   let lastWebviewActivityAt = 0;
 
   const capturedHostCallbacks: {
+    authoringLifecycle?: Parameters<
+      RadiusExtensionDependencies["hostCallbacks"]["setAuthoringLifecycle"]
+    >[0];
     appBicepHandoff?: Parameters<
       RadiusExtensionDependencies["hostCallbacks"]["setAppBicepHandoff"]
     >[0];
@@ -389,6 +392,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       validateGhcrTargetForRepo: vi.fn(validateGhcrTargetForRepo)
     },
     hostCallbacks: {
+      setAuthoringLifecycle: vi.fn((lifecycle) => {
+        capturedHostCallbacks.authoringLifecycle = lifecycle;
+      }),
       setAppBicepHandoff: vi.fn((fn) => {
         capturedHostCallbacks.appBicepHandoff = fn;
       }),
@@ -406,6 +412,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       })
     },
     process: {
+      runValidator: vi.fn(async () => ({ stdout: "", stderr: "" })),
       existsSync: vi.fn(() => true),
       execFile: vi.fn(async () => ({ stdout: "", stderr: "" }))
     },
@@ -458,6 +465,20 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
           filesByRepoBranch[`remote:${repo}@${branch}:${repoPath}`] ?? null
       )
     },
+    beginManagedModel: vi.fn((workspace: string) => ({
+      stagingDir: `${workspace}/.radius/.staging-managed-test`,
+      artifact: () => {
+        throw new Error("No test publication artifact configured");
+      },
+      assertBaseline: vi.fn(),
+      cancel: vi.fn(),
+      validate: async () => {
+        throw new Error("No test model validation configured");
+      },
+      promote: async () => {
+        throw new Error("No test promotion configured");
+      }
+    })),
     radiusAppBicepSkill: vi.fn((repoPath?: string, brief?: string) =>
       JSON.stringify({
         skill: "radius-app-bicep",

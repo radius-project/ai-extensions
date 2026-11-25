@@ -15,8 +15,10 @@
 import { createRadiusCanvas } from "./create-radius-canvas.js";
 import { redactCredentials } from "@radius-project/core";
 import { createRadiusTools } from "./create-radius-tools.js";
+import { READ_ONLY_MODEL_SELECTION } from "../workspace.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import { createAppModelHandoff } from "./app-model-handoff.js";
+import { createCanvasModelAuthoring } from "./canvas-model-authoring.js";
 import { readSelectedSourceRevision } from "../app-model-authoring-failure.js";
 import {
   createModelingActivity,
@@ -54,7 +56,7 @@ export interface RadiusShutdownOutcome {
 
 export interface RadiusExtension {
   canvases: ReturnType<typeof createRadiusCanvas>[];
-  tools: ReturnType<typeof createRadiusTools>;
+  tools: ReturnType<typeof createRadiusTools>["tools"];
   hooks: {
     onPreToolUse: (input: {
       toolName?: unknown;
@@ -110,22 +112,25 @@ export function createRadiusExtension(
   // instance's state.
   //
   // Bounded because the key includes the commit the record names, so every
-  // regeneration produces a new one and the set would otherwise grow for as
-  // long as the process runs. Set preserves insertion order, so dropping the
+  // regeneration produces a new one and the map would otherwise grow for as
+  // long as the process runs. Map preserves insertion order, so dropping the
   // oldest evicts the least recently seen problem. Re-asking about a signal
   // that fell out is harmless: the point is to stop a tight loop, not to
   // remember forever.
   const REFRESH_MEMO_LIMIT = 100;
-  const requestedRefreshes = new Set<string>();
+  const requestedRefreshes = new Map<string, symbol>();
 
-  function shouldRequestRefresh(key: string): boolean {
-    if (requestedRefreshes.has(key)) return false;
-    requestedRefreshes.add(key);
+  function claimRefreshMemo(key: string): (() => void) | undefined {
+    if (requestedRefreshes.has(key)) return undefined;
+    const claim = Symbol(key);
+    requestedRefreshes.set(key, claim);
     if (requestedRefreshes.size > REFRESH_MEMO_LIMIT) {
-      const oldest = requestedRefreshes.values().next().value;
+      const oldest = requestedRefreshes.keys().next().value;
       if (oldest !== undefined) requestedRefreshes.delete(oldest);
     }
-    return true;
+    return () => {
+      if (requestedRefreshes.get(key) === claim) requestedRefreshes.delete(key);
+    };
   }
 
   const missingModelHandoffs = createMissingModelHandoffClaims(() =>
@@ -148,7 +153,8 @@ export function createRadiusExtension(
         repo,
         branches,
         workspace,
-        deps.appModel.modelingRunLastActivityAtMs
+        deps.appModel.modelingRunLastActivityAtMs,
+        (path) => authoring.owner.currentRun(repo, branches, path)?.stagingDir
       )
   });
 
@@ -175,12 +181,40 @@ export function createRadiusExtension(
   // Every graph render reaches this callback through the HTTP routes, which is
   // why it, and no hook or canvas-open fallback, decides whether the model needs
   // authoring, refreshing, confirming, or only a note.
+  const authoring = createCanvasModelAuthoring(deps, workspaceState);
+  deps.hostCallbacks.setAuthoringLifecycle({
+    liveStage: (state, repo, branches) =>
+      authoring.owner.currentRun(repo, branches, state.workspacePath)
+        ?.stagingDir,
+    selectionChanged: authoring.selectionChanged
+  });
   const handOffAppModel = createAppModelHandoff({
+    beginManaged: authoring.begin,
+    cancelManaged: authoring.owner.retire,
+    currentManaged: authoring.owner.currentRun,
     resolveContext: () => workspaceState(),
     resolveStatus: (repo, branch, state) =>
       resolveAppModelStatus(repo, branch, state),
     assertWorkspaceSource: (source) =>
       deps.graphSources.assertWorkspaceSource(source),
+    async isCurrentManagedWorkspace(source) {
+      const workspace = await workspaceState();
+      return (
+        workspace.workspacePath === source.workspacePath &&
+        workspace.workspaceRepo === source.repo &&
+        workspace.workspaceBranch === source.ref
+      );
+    },
+    authorizeMissingModel(page, state, statuses) {
+      if (
+        page !== "graph" ||
+        !state?.canvasInstanceId ||
+        statuses.length !== 1 ||
+        statuses[0].source.kind !== "workspace"
+      ) {
+        throw new Error(READ_ONLY_MODEL_SELECTION);
+      }
+    },
     evaluateSource: (repo, branch, state) =>
       evaluateAppSourceForBranch(repo, branch, state),
     send: (message) =>
@@ -200,8 +234,10 @@ export function createRadiusExtension(
         waitStartedAtMs
       }),
     announceModelingRun: (repo, branches) => {
-      for (const branch of branches)
-        modelingActivity.announce({ repo, branch });
+      const releases = branches.map((branch) =>
+        modelingActivity.announce({ repo, branch })
+      );
+      return () => releases.forEach((release) => release());
     },
     wait: (ms) => deps.clock.wait(ms),
     log: (message) => {
@@ -211,10 +247,7 @@ export function createRadiusExtension(
         /* session.log unavailable → drop the notice */
       }
     },
-    shouldRequestRefresh,
-    releaseRefreshMemo: (key: string) => {
-      requestedRefreshes.delete(key);
-    },
+    claimRefreshMemo,
     missingModelHandoffs
   });
   deps.hostCallbacks.setAppBicepHandoff(
@@ -226,16 +259,19 @@ export function createRadiusExtension(
       state,
       isCurrent,
       environmentKey
-    }) =>
-      handOffAppModel({
+    }) => {
+      const panelIsCurrent = state && authoring.capturePanel(state);
+      return handOffAppModel({
         repo,
         branches,
         page,
         progressView,
         state,
-        isCurrent,
+        isCurrent: () =>
+          panelIsCurrent?.() !== false && isCurrent?.() !== false,
         environmentKey
-      })
+      });
+    }
   );
   deps.hostCallbacks.setDeployRepairHandoff(
     ({ repo, branch, error, deployRunUrl, attemptId, appFile }) =>
@@ -347,11 +383,20 @@ export function createRadiusExtension(
   function shutdown(signal = "shutdown"): Promise<RadiusShutdownOutcome> {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
+      const authoringDrain = authoring.owner.close();
+      const publicationDrain = closePublication();
       shuttingDown = true;
       const drain = deps.executionOwner.shutdown();
       const deploymentDrain =
         deps.deployment.owner.shutdown(CLEANUP_TIMEOUT_MS);
       let complete = true;
+      function reportWriterDrain(results: boolean[]) {
+        if (results.every(Boolean)) return;
+        complete = false;
+        deps.logError(
+          "Radius shutdown incomplete: a local authoring or publication process could not be confirmed stopped."
+        );
+      }
       try {
         console.error(
           `[radius] received ${signal}; shutting down ${deps.servers.size} canvas server(s)...`
@@ -396,7 +441,14 @@ export function createRadiusExtension(
         });
         if (
           !(await withTimeout(
-            Promise.all([...closes, drained, deploymentsDrained]),
+            Promise.all([
+              ...closes,
+              drained,
+              deploymentsDrained,
+              Promise.all([publicationDrain, authoringDrain]).then(
+                reportWriterDrain
+              )
+            ]),
             CLEANUP_TIMEOUT_MS
           ))
         ) {
@@ -551,9 +603,15 @@ export function createRadiusExtension(
     });
   }
 
+  const { tools, closePublication } = createRadiusTools(
+    deps,
+    modelingActivity,
+    missingModelHandoffs,
+    authoring.owner
+  );
   return {
-    canvases: [createRadiusCanvas(deps, canvasInstances)],
-    tools: createRadiusTools(deps, modelingActivity, missingModelHandoffs),
+    canvases: [createRadiusCanvas(deps, authoring, canvasInstances)],
+    tools,
     hooks: {
       // Nothing here inspects the application model any more. Opening a graph
       // page used to be denied until .radius/app.bicep existed, but every graph

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   createGraphOrchestrator,
   enrichPlannedGraph,
@@ -58,6 +59,7 @@ import {
   reconcileAppModelAuthoringFailure,
   type AppModelAuthoringFailure
 } from "../../app-model-authoring-failure.js";
+import { captureSourceRefSelection } from "../../source-refs.js";
 
 // The use-case layer behind the three `graphs-planning` write routes.
 //
@@ -272,6 +274,7 @@ interface GraphProgressHandle {
   generation: number;
   owner: number;
   record: GraphProgressRecord;
+  selectionEpoch: string;
 }
 
 function graphProgressRecord(
@@ -297,6 +300,8 @@ function beginGraphProgress(
   // stages already reported — exactly the reset a user sees when they leave the
   // page and come back.
   const sameKey = existing?.graphProgressKey === key;
+  const selectionEpoch =
+    (sameKey && existing.graphProgressSelectionEpoch) || randomUUID();
   const handoffFailed =
     typeof existing?.graphProgressHandoffFailure === "string";
   const continuing =
@@ -327,6 +332,7 @@ function beginGraphProgress(
       }
     );
   record.graphProgressActive = true;
+  record.graphProgressSelectionEpoch = selectionEpoch;
   record.graphProgressRepo = target.repo;
   record.graphProgressBranches = target.branches;
   record.graphProgressOwner += 1;
@@ -337,7 +343,8 @@ function beginGraphProgress(
     key,
     generation: record.graphProgressGeneration,
     owner: record.graphProgressOwner,
-    record
+    record,
+    selectionEpoch
   };
 }
 
@@ -355,15 +362,11 @@ function isCurrentGraphProgress(
 function ownsGraphSelection(state: CanvasState, handle: GraphProgressHandle) {
   const record = graphProgressRecord(state, handle.view);
   return (
-    record === handle.record &&
-    record.graphProgressKey === handle.key &&
-    record.graphProgressGeneration === handle.generation
+    record?.graphProgressKey === handle.key &&
+    record.graphProgressSelectionEpoch === handle.selectionEpoch
   );
 }
 
-// True while the view still shows the selection a request started for. Unlike
-// `isCurrentGraphProgress`, a newer automatic request for the same selection
-// (the `needsAppBicep` poll) does not end it; only a selection change does.
 // Close the record so nothing still claims to be in flight. The stages stay
 // readable: a page that returns after the build finished sees what happened
 // rather than an empty panel.
@@ -858,9 +861,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "graph",
           sourceRefContext.token
         );
+      const sourceSelectionCurrent = captureSourceRefSelection(state, "graph");
       const isCurrentSelection = (): boolean =>
         dependencies.readInstanceEntry(instanceId) === entry &&
         ownsGraphSelection(state, progressHandle) &&
+        sourceSelectionCurrent() &&
         isCurrentSourceRef();
       const workspacePath = state.workspacePath;
       const isCurrentOutput = () =>
@@ -1243,9 +1248,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "planned",
           sourceRefContext.token
         );
+      const sourceSelectionCurrent = captureSourceRefSelection(
+        state,
+        "planned"
+      );
       const isCurrentSelection = (): boolean =>
         dependencies.readInstanceEntry(instanceId) === entry &&
         ownsGraphSelection(state, progressHandle) &&
+        sourceSelectionCurrent() &&
         isCurrentSourceRef();
       const workspacePath = state.workspacePath;
       const ownsPlan = () =>
@@ -1652,9 +1662,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         headBranch: data.head
       });
       const { token: handoffSourceToken } = sourceRefContext;
+      const sourceSelectionCurrent = captureSourceRefSelection(state, "diff");
       const isCurrentSelection = (): boolean =>
         dependencies.readInstanceEntry(instanceId) === entry &&
         ownsGraphSelection(state, progressHandle) &&
+        sourceSelectionCurrent() &&
         dependencies.isCurrentSourceRefToken(state, "diff", handoffSourceToken);
       ownsDiffRequest = isCurrentRequest;
       state.diffBase = data.base;

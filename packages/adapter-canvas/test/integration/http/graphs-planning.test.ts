@@ -15,15 +15,19 @@ import {
   createWorkflowArtifactReader
 } from "@radius-project/adapter-shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { hashAppBicep } from "../../../src/app-bicep-hash.js";
+import type { RadiusExtensionDependencies } from "../../../src/runtime/dependencies.js";
 import {
   createWorkflowObservationScope,
   type WorkflowObservationScope
 } from "../../../src/server/services/workflow-observation-scope.js";
 import {
+  APP_ORIGIN_REPO_PATH,
   deployStatusKeys,
   mergeDeployedGraphDisplayMetadata,
   mergeDeployedGraphMetadata,
-  projectDeployedGraph
+  projectDeployedGraph,
+  serializeAppOrigin
 } from "@radius-project/core";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
@@ -188,6 +192,152 @@ async function concurrentGraphRuntime(
 }
 
 describe("graph concurrency through production HTTP routes", () => {
+  it.each(["JSON", "SSE"])(
+    "keeps %s graph reload responsive and the registered refresh current while promotion prepares Git",
+    async (transport) => {
+      const workspace = mkdtempSync(path.resolve(".radius-refresh-http-"));
+      const discoveryEntered = createDeferred<void>();
+      const discovery = createDeferred<void>();
+      let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
+      let sdk: Awaited<ReturnType<typeof createRuntimeSdkHarness>> | undefined;
+      try {
+        initCommittedGraphWorkspace(workspace);
+        const model = "resource fixture\n";
+        const appFile = path.join(workspace, ".radius", "app.bicep");
+        const stage = path.join(
+          workspace,
+          ".radius",
+          ".staging-managed-fixture"
+        );
+        mkdirSync(path.dirname(appFile));
+        writeFileSync(appFile, model);
+        type Promotion = ReturnType<
+          RadiusExtensionDependencies["beginManagedModel"]
+        >["promote"];
+        const promote = vi.fn<Promotion>(
+          async (prepareCommit, beforeCommit, options) => {
+            discoveryEntered.resolve();
+            await discovery.promise;
+            await prepareCommit();
+            beforeCommit();
+            options?.onFilesystemCommitted?.({
+              definitionHash: "fixture-definition",
+              originHash: "fixture-origin"
+            });
+            return { published: ["app.bicep"], gitError: "" };
+          }
+        );
+        sdk = await createRuntimeSdkHarness(
+          {
+            workspaceContext: {
+              workspacePath: workspace,
+              repo: "octo/app",
+              branch: "main"
+            },
+            bicepByRepoBranch: { "workspace:octo/app@main": model },
+            filesByRepoBranch: {
+              [`workspace:octo/app@main:${APP_ORIGIN_REPO_PATH}`]:
+                serializeAppOrigin({
+                  generatedAt: "2026-08-11T05:32:32.000Z",
+                  sourceCommit: "a".repeat(40),
+                  skillVersion: "0.1.0-test",
+                  radiusVersion: "0.60",
+                  appBicepHash: hashAppBicep(model)
+                })
+            },
+            headCommits: { [`workspace:${workspace}`]: "b".repeat(40) },
+            sourceChangedSince: true
+          },
+          (deps) => {
+            deps.appModel.workspaceSourceRevision = async () =>
+              "workspace:saved";
+            deps.radiusAppBicepSkill = () =>
+              JSON.stringify({
+                nodeCommand: path.resolve("fixture-node"),
+                skillBase: path.resolve("fixture-skill")
+              });
+            const beginManaged = deps.beginManagedModel;
+            deps.beginManagedModel = (worktree) => ({
+              ...beginManaged(worktree),
+              stagingDir: stage,
+              validate: (check) => check(path.join(stage, "app.bicep")),
+              promote
+            });
+          }
+        );
+        h = await concurrentGraphRuntime(workspace);
+        h.entry.state.canvasInstanceId = "graph-races";
+        sdk.servers.set("graph-races", h.entry);
+        const handoff = sdk.capturedHostCallbacks.appBicepHandoff;
+        const complete = sdk.extension.tools.find(
+          ({ name }) => name === "radius_complete_app_authoring"
+        );
+        if (!handoff || !complete)
+          throw new Error("Missing registered authoring");
+        let settled = createDeferred<void>();
+        setAppBicepHandoff(async (input) => {
+          const current = settled;
+          try {
+            await handoff(input);
+          } finally {
+            current.resolve();
+          }
+        });
+        const { builds, entry, load, stream } = h;
+        const request = transport === "JSON" ? load : stream;
+
+        const first = request();
+        await settled.promise;
+        await vi.waitFor(() => expect(builds).toHaveLength(1));
+        builds[0].resolve();
+        expect(await (await first).text()).toContain(
+          transport === "JSON" ? "build-0" : '"reload":true'
+        );
+        const requestToken =
+          entry.state.appModelAttemptTokens?.["octo/app::main"];
+        expect(requestToken).toBeTruthy();
+        const completionSettled = vi.fn();
+        const completion = Promise.resolve(
+          complete.handler({ requestToken, outcome: "complete" })
+        ).finally(completionSettled);
+        await Promise.race([
+          discoveryEntered.promise,
+          completion.then(() => {
+            throw new Error("Completion settled before Git discovery");
+          })
+        ]);
+
+        settled = createDeferred<void>();
+        let reloadFinished = false;
+        const reload = request()
+          .then((response) => response.text())
+          .finally(() => {
+            reloadFinished = true;
+          });
+        await settled.promise;
+        await vi.waitFor(() =>
+          expect(builds.length > 1 || reloadFinished).toBe(true)
+        );
+        builds[1]?.resolve();
+        expect(await reload).not.toContain('"stale":true');
+        expect(completionSettled).not.toHaveBeenCalled();
+        expect(sdk.session.send).toHaveBeenCalledOnce();
+        discovery.resolve();
+        await expect(completion).resolves.toMatchObject({
+          kind: "promoted",
+          published: ["app.bicep"]
+        });
+        expect(promote).toHaveBeenCalledOnce();
+      } finally {
+        discovery.resolve();
+        setAppBicepHandoff(null);
+        await sdk?.extension.shutdown("test");
+        await h?.close();
+        rmSync(workspace, { force: true, recursive: true });
+      }
+    }
+  );
+
   it.each(["JSON", "SSE"] as const)(
     "reports stale instead of blank-model recovery after another request takes ownership (%s)",
     async (transport) => {
@@ -379,9 +529,17 @@ describe("graph concurrency through production HTTP routes", () => {
         stagingRoot: workspace
       });
       const sdk = await createRuntimeSdkHarness(
-        { workspaceTreeByRepoBranch: { "octo/app@main": ["Dockerfile"] } },
+        {
+          workspaceTreeByRepoBranch: { "octo/app@main": ["Dockerfile"] },
+          workspaceContext: {
+            workspacePath: workspace,
+            repo: "octo/app",
+            branch: "main"
+          }
+        },
         (deps) => {
           deps.graphSources = sources;
+          deps.appModel.workspaceSourceRevision = async () => "fixture-source";
         }
       );
       let h: Awaited<ReturnType<typeof concurrentGraphRuntime>> | undefined;
@@ -405,6 +563,8 @@ describe("graph concurrency through production HTTP routes", () => {
           }
         });
         h = await concurrentGraphRuntime(workspace);
+        h.entry.state.canvasInstanceId = "graph-races";
+        sdk.servers.set("graph-races", h.entry);
         expect(await (await h.load()).json()).toMatchObject({
           needsAppBicep: true
         });

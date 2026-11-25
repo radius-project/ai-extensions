@@ -2,6 +2,11 @@
 // and createRadiusTools. Factored out so the two factories don't duplicate the
 // same dependency-driven logic.
 
+import { createHash } from "node:crypto";
+import type {
+  CommittedModelIdentity,
+  ObservedModelFile
+} from "../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
 import {
   APP_ORIGIN_REPO_PATH,
   APP_ORIGIN_ROOT_PATH,
@@ -43,6 +48,8 @@ export interface AppModelStatus {
   source: GraphSourceIdentity;
   refreshable: boolean;
   freshness: AppModelFreshness;
+  observedFiles?: readonly ObservedModelFile[];
+  identity?: CommittedModelIdentity;
 }
 
 export interface GraphContextHelpers {
@@ -161,18 +168,31 @@ export function createGraphContextHelpers(
   // root `app.bicep`, and the record is written beside whichever one the
   // generator wrote. So the record has to be looked for in both places, or a
   // root-level model would read as permanently unrecorded.
+  const hashBytes = (text: string) =>
+    createHash("sha256").update(text).digest("hex");
+
   async function readAppOrigin(
-    source: GraphSourceIdentity
+    source: GraphSourceIdentity,
+    observed: ObservedModelFile[]
   ): Promise<string | null> {
     for (const repoPath of [APP_ORIGIN_REPO_PATH, APP_ORIGIN_ROOT_PATH]) {
       const read = await deps.graphSources.readFile(source, repoPath);
       if (read.status === "unavailable") {
+        if (
+          source.kind === "workspace" &&
+          source.definitionPath === "app.bicep"
+        )
+          throw new Error(read.diagnostic);
         if (source.kind === "workspace") throw new Error(read.diagnostic);
         deps.logError(
           `Application model origin is unavailable: ${read.diagnostic}`
         );
         return null;
       }
+      observed.push({
+        path: repoPath,
+        hash: read.status === "present" ? hashBytes(read.content) : null
+      });
       if (read.status === "present") return read.content;
     }
     return null;
@@ -190,9 +210,10 @@ export function createGraphContextHelpers(
   ): Promise<AppModelStatus> {
     const read = await readBicepForBranch(repo, branch, state);
     const workspacePath = read.source.workspacePath;
+    const observed: ObservedModelFile[] = [];
     const { freshness, observation } = await readAppModelEvidence(read, {
       assertSource: () => deps.graphSources.assertWorkspaceSource(read.source),
-      origin: () => readAppOrigin(read.source),
+      origin: () => readAppOrigin(read.source, observed),
       headCommit: () =>
         deps.appModel.workspaceHeadCommit(workspacePath).catch(() => ""),
       sourceChangedSince: (commit) =>
@@ -207,13 +228,38 @@ export function createGraphContextHelpers(
       radiusVersion: () => deps.appModel.radiusVersion().catch(() => ""),
       hashAppBicep
     });
+    const definitionHash =
+      read.status === "present" ? hashBytes(read.content) : null;
+    const originHash = observed.find(({ hash }) => hash !== null)?.hash;
     return {
       repo,
       branch,
       source: read.source,
       refreshable:
         read.source.kind === "workspace" && observation.kind === "present",
-      freshness
+      freshness,
+      ...((
+        read.source.kind === "workspace" &&
+        read.source.definitionPath === "app.bicep" &&
+        definitionHash
+      ) ?
+        {
+          observedFiles: [
+            { path: ".radius/app.bicep", hash: null },
+            { path: read.source.definitionPath, hash: definitionHash },
+            ...observed
+          ]
+        }
+      : {}),
+      ...((
+        read.source.kind === "workspace" &&
+        read.source.definitionPath === ".radius/app.bicep" &&
+        observed[0]?.hash &&
+        definitionHash &&
+        originHash
+      ) ?
+        { identity: { definitionHash, originHash } }
+      : {})
     };
   }
 

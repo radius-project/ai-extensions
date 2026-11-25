@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { STAGING_DIR_PREFIX } from "@radius-project/core";
 import { toSafeRepoRelPath } from "./workspace.js";
 
@@ -18,9 +18,17 @@ function nearestExistingParent(p: string): string {
     if (parent === dir) return dir; // filesystem root
     dir = parent;
   }
+
   return dir;
 }
 
+function assertStandaloneArtifact(file: string): void {
+  if (/(?:^|[\\/])\.staging-managed-/iu.test(file)) {
+    throw new Error(
+      "Managed staging can only be published with its request token."
+    );
+  }
+}
 // Lexical confinement of a tool-supplied path under the workspace `.radius/`:
 // rejects absolute paths, `..` traversal, null bytes (via toSafeRepoRelPath),
 // and any result that escapes `.radius/`. Returns { radiusRoot, resolved, raw }.
@@ -69,6 +77,7 @@ function confineUnderRadius(
     value,
     fallback
   );
+  assertStandaloneArtifact(resolved.slice(radiusRoot.length));
   // No `.radius/` yet: nothing to canonicalize against; the lexical check
   // already confined the path and the caller reports a missing source.
   if (!existsSync(radiusRoot)) return resolved;
@@ -81,7 +90,9 @@ function confineUnderRadius(
       `Path escapes the workspace .radius directory via a symlink: ${raw}`
     );
   }
-  return existsSync(resolved) ? realProbe : resolved;
+  const canonical = resolve(realProbe, relative(probe, resolved));
+  assertStandaloneArtifact(relative(realRoot, canonical));
+  return canonical;
 }
 
 // Resolve a source path that the tool reads or compiles (a recipe .bicep or a
@@ -129,6 +140,7 @@ export function resolveStagingDirPrefix(
     null
   );
   const name = resolved.slice(radiusRoot.length + 1);
+  assertStandaloneArtifact(name);
   if (
     !name ||
     name.includes(sep) ||

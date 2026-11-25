@@ -36,6 +36,7 @@ import type { WorkflowObservationScope } from "../services/workflow-observation-
 import type { DeployProgress } from "../../deploy-artifacts.js";
 import { expireGraphProgressWait } from "../../shared.js";
 import { evaluateAppBicepWait } from "../../graph-progress-contract.js";
+import { captureSourceRefSelection } from "../../source-refs.js";
 import type {
   GraphRepairAttempt,
   GraphRepairRequest
@@ -48,6 +49,10 @@ import type { CanvasServerEntry } from "../types.js";
 import type {
   ResolvedWorkspaceBranch,
   WorkspaceBranchResolution
+} from "../../workspace.js";
+import {
+  isWorkspaceSelection,
+  READ_ONLY_MODEL_SELECTION
 } from "../../workspace.js";
 import {
   inspectDeploymentGraph,
@@ -937,10 +942,17 @@ export async function handleLoadGraphStream(
     branch
   });
   clearGraphSaveWarningForSelection(entry.state, repo, branch);
-  const isCurrent = () =>
+  const sourceSelectionCurrent = captureSourceRefSelection(
+    entry.state,
+    "graph"
+  );
+  const isCurrentSelection = () =>
     dependencies.readInstanceEntry(instanceId) === entry &&
-    entry.state.graphBuildGeneration === requestGeneration &&
+    sourceSelectionCurrent() &&
     dependencies.isCurrentSourceRef(entry, sourceRefContext.token);
+  const isCurrent = () =>
+    isCurrentSelection() &&
+    entry.state.graphBuildGeneration === requestGeneration;
   const workspacePath = entry.state.workspacePath;
   const isCurrentOutput = () =>
     isCurrent() && entry.state.workspacePath === workspacePath;
@@ -965,13 +977,26 @@ export async function handleLoadGraphStream(
       // A model that exists can still no longer describe its source. The runtime
       // classifies it and decides what, if anything, to say; the graph still
       // streams either way.
-      dependencies.triggerAppBicepHandoff(entry, repo, branch, isCurrent);
+      dependencies.triggerAppBicepHandoff(
+        entry,
+        repo,
+        branch,
+        isCurrentSelection
+      );
     } else {
+      if (!isWorkspaceSelection(entry.state, repo, branch)) {
+        sendDone({ error: READ_ONLY_MODEL_SELECTION, repo, branch });
+        return;
+      }
       const source = evaluateAppSource(
         await dependencies.listBranchPaths(entry, repo, branch)
       );
-      if (!isCurrent()) {
+      if (!isCurrent() || !isCurrentSelection()) {
         sendDone({ stale: true });
+        return;
+      }
+      if (!isWorkspaceSelection(entry.state, repo, branch)) {
+        sendDone({ error: READ_ONLY_MODEL_SELECTION, repo, branch });
         return;
       }
       if (source.status === "none") {
@@ -983,7 +1008,12 @@ export async function handleLoadGraphStream(
         });
         return;
       }
-      dependencies.triggerAppBicepHandoff(entry, repo, branch, isCurrent);
+      dependencies.triggerAppBicepHandoff(
+        entry,
+        repo,
+        branch,
+        isCurrentSelection
+      );
       // Deliberately outside the terminal-failure contract that the JSON
       // load-graph/plan-graph routes implement: this stream has no restartWait,
       // so every connection is a fresh explicit open with no way to distinguish

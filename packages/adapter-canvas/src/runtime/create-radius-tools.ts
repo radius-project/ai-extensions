@@ -10,6 +10,9 @@ import {
   prepareAppAuthoring,
   unsupportedAppSourceReport
 } from "@radius-project/core";
+import { isRadProcessExitUnconfirmed } from "@radius-project/adapter-shared";
+import { join } from "node:path";
+import { isPublishableExtraArtifact } from "../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
 import { errorMessage, optionalString } from "./util.js";
 import {
   createGraphContextHelpers,
@@ -23,6 +26,7 @@ import {
 } from "./pr-graph-diff-result.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { ModelingActivity } from "./modeling-activity.js";
+import type { createModelAuthoringOwner } from "./model-authoring-owner.js";
 import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
 import { missingModelHandoffIncludesBranch } from "./missing-model-handoff-claims.js";
 import type { CanvasState } from "../shared.js";
@@ -44,7 +48,8 @@ export function createRadiusTools(
   modelingActivity: ModelingActivity,
   // Released when a modeling run reports a terminal failure, so the retry the
   // failure message promises is not swallowed by the dead run's claim.
-  missingModelHandoffs: MissingModelHandoffClaims
+  missingModelHandoffs: MissingModelHandoffClaims,
+  authoring: ReturnType<typeof createModelAuthoringOwner>
 ) {
   const {
     workspaceState,
@@ -74,22 +79,41 @@ export function createRadiusTools(
     }
   }
 
+  function managedToken(args: ToolArgs): string | undefined {
+    if (args.requestToken === undefined) return undefined;
+    if (typeof args.requestToken !== "string" || !args.requestToken.trim()) {
+      throw new Error("A valid Radius authoring request token is required.");
+    }
+    return args.requestToken;
+  }
+
   const publication = createAppPublication({
     resolveExisting: deps.publishTargets.resolveExistingRadiusArtifact,
     resolveTarget: deps.publishTargets.resolveRadiusArtifactTarget,
     stagingPrefix: deps.publishTargets.resolveStagingDirPrefix,
     validateRegistryTarget: deps.publishTargets.validateGhcrTargetForRepo,
+    isUnconfirmedExit: isRadProcessExitUnconfirmed,
+    localTargetKey: (target) =>
+      process.platform === "win32" ? target.toLowerCase() : target,
     exists: deps.process.existsSync,
-    compileExtension: (fromFile, target) =>
+    compileExtension: (fromFile, target, workspace) =>
       deps.rad.runRadBicepPublishExtension({
         fromFile,
         target,
-        log: logToSession
+        log: logToSession,
+        beforeSpawn: () => authoring.assertStandalone(workspace)
       }),
-    publishRecipe: (file, target) =>
-      deps.withGhcrDockerConfig((env) =>
-        deps.rad.runRadBicepPublish({ file, target, env, log: logToSession })
-      )
+    publishRecipe: (file, target, workspace) =>
+      deps.withGhcrDockerConfig((env) => {
+        authoring.assertStandalone(workspace);
+        return deps.rad.runRadBicepPublish({
+          file,
+          target,
+          env,
+          log: logToSession,
+          beforeSpawn: () => authoring.assertStandalone(workspace)
+        });
+      })
   });
 
   // Records that a modeling run is about to start, so a graph render that finds
@@ -104,7 +128,7 @@ export function createRadiusTools(
     });
   }
 
-  return [
+  const tools = [
     {
       ...declarationByName.get("radius_generate_app")!,
       // Two source checks gate the authoring handoff, and they differ in
@@ -198,6 +222,9 @@ export function createRadiusTools(
         const stillCurrent = () =>
           deps.servers.get(instanceId) === entry &&
           entry.state.appModelAttemptTokens?.[target] === attemptToken;
+        const alreadyRecorded = () =>
+          entry.state.appModelFailures?.[target]?.attemptToken === attemptToken;
+        if (alreadyRecorded()) return { recorded: true };
         const inspection = await inspectAppModelFailure({
           current: stillCurrent,
           readModel: () => readBicepForBranch(repo, branch, entry.state),
@@ -216,6 +243,7 @@ export function createRadiusTools(
               "A newer Canvas modeling attempt replaced this one; the stale failure was not recorded."
           };
         }
+        if (alreadyRecorded()) return { recorded: true };
         if (inspection.kind === "model-present") {
           clearAppModelAuthoringFailure(entry.state, repo, branch);
           return {
@@ -234,6 +262,7 @@ export function createRadiusTools(
             { environmentKey: entry.state.appModelAttemptEnvironments[target] }
           : {})
         };
+        authoring.retire(attemptToken);
         const claim = entry.state.appModelAttemptClaims?.[target];
         if (claim) missingModelHandoffs.release(claim);
         for (const [handoffTarget, key] of Object.entries(
@@ -299,6 +328,27 @@ export function createRadiusTools(
       }
     },
     {
+      ...declarationByName.get("radius_complete_app_authoring")!,
+      handler: async (args: ToolArgs) => {
+        try {
+          const token = managedToken(args);
+          if (!token)
+            throw new Error("A Radius authoring request token is required.");
+          if (args.outcome === "cancel") {
+            if (!authoring.cancel(token))
+              throw new Error("Unknown or expired Radius authoring request.");
+            return { kind: "cancelled" };
+          }
+          if (args.outcome !== "complete")
+            throw new Error("Choose complete or cancel.");
+          const result = await authoring.finish(token);
+          return { kind: "promoted", ...result };
+        } catch (error) {
+          return { kind: "refused", error: errorMessage(error) };
+        }
+      }
+    },
+    {
       ...declarationByName.get("radius_publish_custom_type_extension")!,
       // Modeling now writes its whole run into `.radius/.staging-<runId>/` and
       // publishes it only once it is complete, so the custom-type package this
@@ -308,7 +358,41 @@ export function createRadiusTools(
       // directory is itself confined to a `.staging-*` child of `.radius/`.
       handler: async (args: ToolArgs) => {
         try {
+          const token = managedToken(args);
+          if (token) {
+            if (
+              args.stagingDir !== undefined ||
+              args.manifestPath !== undefined ||
+              args.targetPath !== undefined
+            )
+              throw new Error(
+                "Managed compilation takes a request token only; the staging paths are fixed."
+              );
+            return await authoring.publish(
+              token,
+              (_, stagingDir) =>
+                publication.extensionKey(join(stagingDir, "custom-types.tgz")),
+              publication.enqueue,
+              async (staging, _, guards) => {
+                const fromFile = staging.artifact("custom-types.yaml", true);
+                const target = staging.artifact("custom-types.tgz", false);
+                await deps.rad.runRadBicepPublishExtension({
+                  fromFile,
+                  target,
+                  log: logToSession,
+                  prepareSpawn: guards.prepareSpawn,
+                  beforeSpawn() {
+                    guards.beforeSpawn();
+                    staging.artifact("custom-types.yaml", true);
+                    staging.artifact("custom-types.tgz", false);
+                  }
+                });
+                return `Published custom-type extension to ${target}. Reference it from the staged bicepconfig.json.`;
+              }
+            );
+          }
           const { workspacePath } = await workspaceState();
+          authoring.assertStandalone(workspacePath);
           const result = await publication.compileExtension(
             workspacePath,
             args
@@ -326,12 +410,57 @@ export function createRadiusTools(
       ...declarationByName.get("radius_publish_recipe")!,
       handler: async (args: ToolArgs) => {
         try {
-          const { workspacePath, workspaceRepo } = await workspaceState();
-          const result = await publication.publishRecipe(
-            workspacePath,
-            workspaceRepo,
-            args
-          );
+          const token = managedToken(args);
+          const recipe = token ? optionalString(args.file) : "";
+          const target = token ? String(args.target ?? "").trim() : "";
+          if (
+            token &&
+            (recipe === "custom-recipe-pack.bicep" ||
+              !isPublishableExtraArtifact(recipe))
+          ) {
+            throw new Error(
+              "Managed publication requires a staged recipe filename, not a path."
+            );
+          }
+          const result =
+            token ?
+              await authoring.publish(
+                token,
+                (source) => {
+                  const error = deps.publishTargets.validateGhcrTargetForRepo(
+                    args.target,
+                    source.repo
+                  );
+                  if (error) throw new Error(error);
+                  return publication.recipeKey(target);
+                },
+                publication.enqueue,
+                async (staging, _, guards) => {
+                  const published = await deps.withGhcrDockerConfig((env) => {
+                    guards.assertCurrent();
+                    return deps.rad.runRadBicepPublish({
+                      file: staging.artifact(recipe, true),
+                      target,
+                      env,
+                      log: logToSession,
+                      prepareSpawn: guards.prepareSpawn,
+                      beforeSpawn() {
+                        guards.beforeSpawn();
+                        staging.artifact(recipe, true);
+                      }
+                    });
+                  });
+                  return {
+                    kind: "published",
+                    reference: String(published)
+                  } as const;
+                }
+              )
+            : await publication.publishRecipe(async () => {
+                const state = await workspaceState();
+                authoring.assertStandalone(state.workspacePath);
+                return state;
+              }, args);
           if (result.kind === "refused") return result.error;
           if (result.kind === "missing") {
             return `Recipe file not found at ${result.path}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
@@ -366,6 +495,7 @@ export function createRadiusTools(
         JSON.stringify(await deps.environment.control(args))
     }
   ];
+  return { tools, closePublication: publication.close };
 }
 
-export type RadiusTools = ReturnType<typeof createRadiusTools>;
+export type RadiusTools = ReturnType<typeof createRadiusTools>["tools"];

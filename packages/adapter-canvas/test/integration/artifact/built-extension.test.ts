@@ -688,6 +688,8 @@ describe("P0-C built Radius extension artifact", () => {
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-bicep/references/source-code-references.md",
       "skills/radius-app-bicep/scripts/show-radius-type.mjs",
+      "skills/radius-app-bicep/scripts/promote-app-model.mjs",
+      "skills/radius-app-bicep/scripts/app-model-staging.mjs",
       "skills/radius-app-bicep/scripts/validate-bicep.mjs",
       "skills/radius-app-bicep/scripts/bicep-security-rules.mjs",
       "skills/radius-report-issue/SKILL.md",
@@ -848,6 +850,29 @@ describe("P0-C built Radius extension artifact", () => {
     }
     expect(notices).not.toContain("===== reactflow@");
     expect(notices).not.toContain("===== @reactflow/");
+  });
+
+  it("starts and aborts staged modeling using only the packaged skill assets", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "radius-packaged-staging-"));
+    try {
+      const script = join(DIST_SKILL, "scripts", "promote-app-model.mjs");
+      const radius = join(workspace, ".radius");
+      const run = (args: string[]) =>
+        spawnSync(process.execPath, [script, "--radius-dir", radius, ...args], {
+          cwd: workspace,
+          encoding: "utf8",
+          timeout: 5_000
+        });
+      const started = run(["--begin", "--run-id", "artifact"]);
+      expect(started.stderr).toBe("");
+      expect(started.status).toBe(0);
+      const staging = started.stdout.trim();
+      expect(existsSync(join(staging, "run.json"))).toBe(true);
+      expect(run(["--abort", "--staging", staging]).status).toBe(0);
+      expect(existsSync(staging)).toBe(false);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
 
   it("packages environment-independent authoring so a missing deploy Environment cannot block modeling", () => {
@@ -1143,7 +1168,7 @@ describe("P0-C built Radius extension artifact", () => {
     );
 
     expect(skillGuidance).toMatch(
-      /show-radius-type\.mjs` fails while locating, querying, or validating.*stop the modeling run.*promote-app-model\.mjs.*--abort.*report the exact error/su
+      /show-radius-type\.mjs` fails while locating, querying, or validating[^\n]*stop the modeling run, report the exact error, and follow \[When a step fails\]/u
     );
     expect(skillGuidance).toMatch(
       /This includes a missing binary, invalid or incomplete version JSON, a missing or unsupported stamped release identity, a noncanonical commit, and a pull-request release, for which no Radius Bicep types are published\./u
@@ -1193,10 +1218,18 @@ describe("P0-C built Radius extension artifact", () => {
       "Only exit `1` permits a model edit in response to checker output."
     );
     expect(exitTwoRow).toContain(
-      '"<loaded-node>" "<loaded-skill-base>/scripts/promote-app-model.mjs" --abort --staging "<staging-dir>"'
+      "Stop the run and follow [When a step fails](#when-a-step-fails)."
+    );
+    expect(exitTwoRow).not.toContain("--abort");
+    const failureGuidance = skillGuidance.split("### When a step fails")[1];
+    expect(failureGuidance).toMatch(
+      /For a standalone run only, discard the run with:\n\n```text\n[^\n]*promote-app-model\.mjs" --abort --staging "<staging-dir>"/u
+    );
+    expect(failureGuidance).toMatch(
+      /radius_report_modeling_failure[^\n]*while the token is live, before any cancellation/u
     );
     expect(exitTwoRow).toContain(
-      "report the exact checker failure, and state that no application model was written."
+      "Report the exact checker failure and state that no application model was written."
     );
     expect(exitTwoRow).toContain(
       "Do not edit the model based on this result, write `app.origin.json`, publish, or claim that the model compiled."
@@ -1921,7 +1954,7 @@ await resolver.writeStagedBicepConfig(
       asset: "radius-app-bicep skill",
       missingAsset: ["radius-app-bicep"],
       expectedError: "Could not resolve",
-      expectedPath: "show-radius-type.mjs"
+      expectedPath: "app-model-staging.mjs"
     },
     {
       asset: "source-reference guide",

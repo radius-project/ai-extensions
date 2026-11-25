@@ -104,6 +104,7 @@ function staleHandoffGuard(
     rendersInPlace ?
       `If it exists, do not regenerate it; the view at instanceId \`${canvasInstanceId}\` picks it up automatically.`
     : `If it exists, do not regenerate it; reopen the ${page} view so it loads.`,
+    'If you skip generation and the handoff includes a managed request token, call radius_complete_app_authoring with that token and outcome "cancel".',
     "Generate only while the model is still missing."
   ].join(" ");
 }
@@ -356,9 +357,16 @@ export function appModelUnverifiedMessage(
 // only writes the working tree, so there is no action to hand off here: the
 // refresh would require committing and pushing to someone else's branch. State
 // the drift so the graph is not read as current, and stop there.
-export function appModelStaleNotice(status: AppModelStatus): string {
+export function appModelStaleNotice(
+  status: AppModelStatus,
+  comparison = false
+): string {
   const where = status.repo ? ` for ${status.repo}` : "";
-  return `Radius: the application model${where} on branch \`${status.branch}\` may be out of date. ${status.freshness.reason} Refreshing it would require regenerating and pushing to that branch.`;
+  const next =
+    comparison ?
+      "The comparison does not regenerate either branch."
+    : "Refreshing it would require regenerating and pushing to that branch.";
+  return `Radius: the application model${where} on branch \`${status.branch}\` may be out of date. ${status.freshness.reason} ${next}`;
 }
 
 // Log line for a modeling handoff the Canvas could not build, for example

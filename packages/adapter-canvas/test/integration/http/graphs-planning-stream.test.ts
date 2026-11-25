@@ -45,8 +45,7 @@ interface Harness {
 // model token preparation and stale-commit rejection but deliberately do not
 // claim to reproduce the source-ref helpers' wider invalidation and queueing
 // behavior. Network, staging, and subprocess seams are scripted as well.
-function start(): Harness {
-  const state: CanvasState = {};
+function start(state: CanvasState = {}): Harness {
   const script: Script = {};
   const handoffs: { repo: string; branch: string }[] = [];
   let entryMissing = false;
@@ -449,11 +448,15 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
   });
 
   it("hands off generation and streams needsAppBicep when no app.bicep exists", async () => {
-    const harness = start();
+    const harness = start({
+      workspacePath: "/workspace",
+      workspaceRepo: "octo/app",
+      workspaceBranch: "feature/x"
+    });
     harness.script.selection = {
       content: null,
-      fromWorkspace: false,
-      branch: "main",
+      fromWorkspace: true,
+      branch: "feature/x",
       bicepPath: ""
     };
     const entry = await container!.getOrCreate("panel-a");
@@ -472,12 +475,43 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
         branch: "feature/x"
       }
     });
+
     // The query branch reached the handoff, not the state default.
     expect(harness.handoffs).toEqual([
       { repo: "octo/app", branch: "feature/x" }
     ]);
   });
 
+  it("closes a missing remote selection without requesting authoring", async () => {
+    const harness = start({
+      workspacePath: "/workspace",
+      workspaceRepo: "octo/app",
+      workspaceBranch: "main"
+    });
+    harness.script.selection = {
+      content: null,
+      fromWorkspace: false,
+      branch: "feature/x",
+      bicepPath: ""
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/load-graph-stream?repo=octo%2Fapp&branch=feature%2Fx`
+    );
+    const { frames } = await readFrames(response);
+    expect(frames.filter(({ event }) => event === "done")).toEqual([
+      {
+        event: "done",
+        data: {
+          error: expect.stringContaining("read-only"),
+          repo: "octo/app",
+          branch: "feature/x"
+        }
+      }
+    ]);
+    expect(harness.handoffs).toEqual([]);
+  });
   it("keeps compile diagnostics out of the terminal done frame", async () => {
     const harness = start();
     harness.script.buildThrows = new Error("rad app graph failed", {

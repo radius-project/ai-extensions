@@ -10,13 +10,78 @@ export interface AppPublicationPorts {
   resolveTarget: ArtifactPath;
   stagingPrefix(workspace: WorkspacePath, input: unknown): string;
   validateRegistryTarget(target: unknown, repo: WorkspacePath): string | null;
+  isUnconfirmedExit(error: unknown): boolean;
+  localTargetKey(path: string): string;
   exists(path: string): boolean;
-  compileExtension(fromFile: string, target: string): Promise<unknown>;
-  publishRecipe(file: string, target: string): Promise<unknown>;
+  compileExtension(
+    fromFile: string,
+    target: string,
+    workspace: WorkspacePath
+  ): Promise<unknown>;
+  publishRecipe(
+    file: string,
+    target: string,
+    workspace: WorkspacePath
+  ): Promise<unknown>;
 }
 
 export function createAppPublication(ports: AppPublicationPorts) {
+  const publications = new Map<string, Promise<unknown>>();
+  const blockedTargets = new Set<string>();
+  let closed = false;
+
+  async function publishInOrder<T>(
+    key: string,
+    publish: () => T | Promise<T>
+  ): Promise<T> {
+    // A late writer must settle before another request can use that target.
+    // This queue belongs to one runtime, not to the registry or the workspace.
+    const preceding = publications.get(key);
+    const publication = Promise.resolve(preceding)
+      .catch(() => undefined)
+      .then(async () => {
+        if (closed) throw new Error("Radius publication is shutting down.");
+        if (blockedTargets.has(key)) {
+          throw new Error(
+            "Publication to this target is blocked because the previous process tree could not be confirmed stopped."
+          );
+        }
+        try {
+          return await publish();
+        } catch (error) {
+          if (ports.isUnconfirmedExit(error)) blockedTargets.add(key);
+          throw error;
+        }
+      });
+    publications.set(key, publication);
+    try {
+      return await publication;
+    } finally {
+      if (publications.get(key) === publication) publications.delete(key);
+    }
+  }
+
+  const extensionKey = (target: string) =>
+    `extension:${ports.localTargetKey(target)}`;
+  const recipeKey = (target: string) => {
+    const reference = target.trim();
+    const tag = reference.lastIndexOf(":");
+    const split =
+      tag > reference.lastIndexOf("/") && reference.includes("/") ?
+        tag
+      : reference.length;
+    return `recipe:${reference.slice(0, split).toLowerCase()}${reference.slice(split)}`;
+  };
+
   return {
+    async close() {
+      closed = true;
+      await Promise.allSettled(publications.values());
+      return blockedTargets.size === 0;
+    },
+    enqueue: publishInOrder,
+    extensionKey,
+    recipeKey,
     async compileExtension(
       workspace: WorkspacePath,
       input: {
@@ -37,23 +102,31 @@ export function createAppPublication(ports: AppPublicationPorts) {
         `.radius/${prefix}custom-types.tgz`
       );
       if (!ports.exists(from)) return { kind: "missing", path: from } as const;
-      await ports.compileExtension(from, target);
+      await publishInOrder(extensionKey(target), () =>
+        ports.compileExtension(from, target, workspace)
+      );
       return { kind: "compiled", target } as const;
     },
     async publishRecipe(
-      workspace: WorkspacePath,
-      repo: string | null | undefined,
+      resolveWorkspace: () => Promise<{
+        workspacePath?: WorkspacePath;
+        workspaceRepo?: WorkspacePath;
+      }>,
       input: { file?: unknown; target?: unknown }
     ) {
-      const error = ports.validateRegistryTarget(input.target, repo);
-      if (error) return { kind: "refused", error } as const;
-      const file = ports.resolveExisting(workspace, input.file, null);
-      if (!ports.exists(file)) return { kind: "missing", path: file } as const;
-      const published = await ports.publishRecipe(
-        file,
-        String(input.target).trim()
-      );
-      return { kind: "published", reference: String(published) } as const;
+      const { target: requestedTarget } = input;
+      const target = String(requestedTarget || "").trim();
+      return publishInOrder(recipeKey(target), async () => {
+        const { workspacePath: workspace, workspaceRepo: repo } =
+          await resolveWorkspace();
+        const error = ports.validateRegistryTarget(requestedTarget, repo);
+        if (error) return { kind: "refused", error } as const;
+        const file = ports.resolveExisting(workspace, input.file, null);
+        if (!ports.exists(file))
+          return { kind: "missing", path: file } as const;
+        const published = await ports.publishRecipe(file, target, workspace);
+        return { kind: "published", reference: String(published) } as const;
+      });
     }
   };
 }
