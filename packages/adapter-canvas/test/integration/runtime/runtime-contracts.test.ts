@@ -1849,6 +1849,83 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     });
 
     describe("publication preparation races", () => {
+      it.each(["recipe", "extension"] as const)(
+        "queues the second managed %s before it can read source and refuses promotion when it fails",
+        async (kind) => {
+          const fixture = await setup();
+          const { harness, source, releaseGates, handoff, complete, promote } =
+            fixture;
+          await handoff();
+          const requestToken = expectHandoffToken(fixture);
+          const reading = createDeferred<void>();
+          const releaseRead = createDeferred<void>();
+          releaseGates.push(releaseRead.resolve);
+          let hold = true;
+          const read = vi.fn(async () => {
+            if (hold) {
+              hold = false;
+              reading.resolve();
+              await releaseRead.promise;
+            }
+            return source.revision;
+          });
+          harness.deps.appModel.workspaceSourceRevision = read;
+
+          const rad = harness.deps.rad;
+          const effects: string[] = [];
+          async function spawn({
+            prepareSpawn,
+            beforeSpawn
+          }: {
+            prepareSpawn?: () => Promise<void>;
+            beforeSpawn?: () => void;
+          }) {
+            await prepareSpawn?.();
+            beforeSpawn?.();
+            if (effects.length === 0) {
+              effects.push("first");
+              return;
+            }
+            effects.push("second");
+            throw new Error("last writer failed");
+          }
+          if (kind === "recipe") {
+            rad.runRadBicepPublish = async (args) => {
+              await spawn(args);
+              return args.target;
+            };
+          } else {
+            rad.runRadBicepPublishExtension = spawn;
+          }
+          const publish =
+            kind === "recipe" ?
+              () => fixture.publishRecipe({ requestToken, ...recipeArgs })
+            : () => fixture.publishExtension({ requestToken });
+          const first = publish();
+          await reading.promise;
+          const second = publish();
+
+          const other =
+            kind === "recipe" ?
+              fixture.publishExtension({ requestToken })
+            : fixture.publishRecipe({ requestToken, ...recipeArgs });
+          await expect(other).resolves.toContain("Published");
+          expect(read).toHaveBeenCalledTimes(2);
+          expect(effects).toEqual([]);
+
+          const completion = complete({ requestToken, outcome: "complete" });
+          releaseRead.resolve();
+          await expect(first).resolves.toContain("Published");
+          await expect(second).resolves.toContain("last writer failed");
+          expect(effects).toEqual(["first", "second"]);
+          await expect(completion).resolves.toMatchObject({
+            kind: "refused",
+            error: expect.stringContaining("required Radius publication failed")
+          });
+          expect(promote).not.toHaveBeenCalled();
+        }
+      );
+
       function holdRecipeCredentials({
         harness,
         releaseGates
@@ -2035,8 +2112,8 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
           await started.promise;
           assertBaseline.mockClear();
           const second = publishRecipe({ requestToken, ...recipeArgs });
-          await vi.waitFor(() => expect(assertBaseline).toHaveBeenCalledOnce());
           const finishing = complete({ requestToken, outcome: "complete" });
+          expect(assertBaseline).not.toHaveBeenCalled();
           expect(spawn).toHaveBeenCalledOnce();
           if (cancelQueued) {
             await expect(

@@ -158,7 +158,7 @@ describe("application publication", () => {
       (error) => error === unconfirmed
     );
     await expect(
-      publication.compileInOrder(target, async () => {
+      publication.enqueue(publication.extensionKey(target), async () => {
         throw unconfirmed;
       })
     ).rejects.toBe(unconfirmed);
@@ -168,5 +168,38 @@ describe("application publication", () => {
       })
     ).rejects.toThrow("previous Windows process tree");
     expect(ports.compileExtension).not.toHaveBeenCalled();
+  });
+
+  it("holds an already queued same-tag call and refuses it without starting after an unconfirmed exit", async () => {
+    const { publication, ports } = fixture();
+    let failFirst: (error: Error) => void = () => {
+      throw new Error("First publication did not start");
+    };
+    const unconfirmed = new Error("Windows process tree exit unconfirmed");
+    ports.isUnconfirmedExit.mockImplementation(
+      (error) => error === unconfirmed
+    );
+    const key = publication.recipeKey(" br:ghcr.io/org/repo/database:v1 ");
+    const first = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          failFirst = reject;
+        })
+    );
+    const older = expect(publication.enqueue(key, first)).rejects.toBe(
+      unconfirmed
+    );
+    const successor = vi.fn();
+    const queued = expect(
+      publication.enqueue(
+        publication.recipeKey("BR:GHCR.IO/ORG/REPO/DATABASE:V1"),
+        successor
+      )
+    ).rejects.toThrow("previous Windows process tree");
+    await vi.waitFor(() => expect(first).toHaveBeenCalledOnce());
+    expect(successor).not.toHaveBeenCalled();
+    failFirst(unconfirmed);
+    await Promise.all([older, queued]);
+    expect(successor).not.toHaveBeenCalled();
   });
 });

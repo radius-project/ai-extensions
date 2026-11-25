@@ -29,7 +29,10 @@ export function createAppPublication(ports: AppPublicationPorts) {
   const publications = new Map<string, Promise<unknown>>();
   const blockedTargets = new Set<string>();
 
-  async function publishInOrder<T>(key: string, publish: () => T) {
+  async function publishInOrder<T>(
+    key: string,
+    publish: () => T | Promise<T>
+  ): Promise<T> {
     // A late writer must settle before another request can use that target.
     // This queue belongs to one runtime, not to the registry or the workspace.
     const preceding = publications.get(key);
@@ -56,12 +59,14 @@ export function createAppPublication(ports: AppPublicationPorts) {
     }
   }
 
-  function compileInOrder<T>(target: string, publish: () => T) {
-    return publishInOrder(`extension:${ports.localTargetKey(target)}`, publish);
-  }
+  const extensionKey = (target: string) =>
+    `extension:${ports.localTargetKey(target)}`;
+  const recipeKey = (target: string) => `recipe:${target.trim().toLowerCase()}`;
 
   return {
-    compileInOrder,
+    enqueue: publishInOrder,
+    extensionKey,
+    recipeKey,
     async compileExtension(
       workspace: WorkspacePath,
       input: {
@@ -82,7 +87,7 @@ export function createAppPublication(ports: AppPublicationPorts) {
         `.radius/${prefix}custom-types.tgz`
       );
       if (!ports.exists(from)) return { kind: "missing", path: from } as const;
-      await compileInOrder(target, () =>
+      await publishInOrder(extensionKey(target), () =>
         ports.compileExtension(from, target, workspace)
       );
       return { kind: "compiled", target } as const;
@@ -90,17 +95,12 @@ export function createAppPublication(ports: AppPublicationPorts) {
     async publishRecipe(
       workspace: WorkspacePath,
       repo: string | null | undefined,
-      input: { file?: unknown; target?: unknown },
-      managedPublish?: (target: string) => Promise<unknown>
+      input: { file?: unknown; target?: unknown }
     ) {
       const error = ports.validateRegistryTarget(input.target, repo);
       if (error) return { kind: "refused", error } as const;
       const target = String(input.target).trim();
-      return publishInOrder(`recipe:${target.toLowerCase()}`, async () => {
-        if (managedPublish) {
-          const published = await managedPublish(target);
-          return { kind: "published", reference: String(published) } as const;
-        }
+      return publishInOrder(recipeKey(target), async () => {
         const file = ports.resolveExisting(workspace, input.file, null);
         if (!ports.exists(file))
           return { kind: "missing", path: file } as const;

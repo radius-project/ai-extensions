@@ -11,6 +11,7 @@ import {
   unsupportedAppSourceReport
 } from "@radius-project/core";
 import { isRadProcessExitUnconfirmed } from "@radius-project/adapter-shared";
+import { join } from "node:path";
 import { errorMessage, optionalString } from "./util.js";
 import {
   createGraphContextHelpers,
@@ -364,23 +365,23 @@ export function createRadiusTools(
               );
             return await authoring.publish(
               token,
-              () => "extension",
+              (_, stagingDir) =>
+                publication.extensionKey(join(stagingDir, "custom-types.tgz")),
+              publication.enqueue,
               async (staging, _, guards) => {
                 const fromFile = staging.artifact("custom-types.yaml", true);
                 const target = staging.artifact("custom-types.tgz", false);
-                await publication.compileInOrder(target, () =>
-                  deps.rad.runRadBicepPublishExtension({
-                    fromFile,
-                    target,
-                    log: logToSession,
-                    prepareSpawn: guards.prepareSpawn,
-                    beforeSpawn() {
-                      guards.beforeSpawn();
-                      staging.artifact("custom-types.yaml", true);
-                      staging.artifact("custom-types.tgz", false);
-                    }
-                  })
-                );
+                await deps.rad.runRadBicepPublishExtension({
+                  fromFile,
+                  target,
+                  log: logToSession,
+                  prepareSpawn: guards.prepareSpawn,
+                  beforeSpawn() {
+                    guards.beforeSpawn();
+                    staging.artifact("custom-types.yaml", true);
+                    staging.artifact("custom-types.tgz", false);
+                  }
+                });
                 return `Published custom-type extension to ${target}. Reference it from the staged bicepconfig.json.`;
               }
             );
@@ -406,6 +407,7 @@ export function createRadiusTools(
         try {
           const token = managedToken(args);
           const recipe = token ? optionalString(args.file) : "";
+          const target = token ? String(args.target ?? "").trim() : "";
           if (token && !/^[a-z][a-z0-9-]*-recipe\.bicep$/iu.test(recipe)) {
             throw new Error(
               "Managed publication requires a staged recipe filename, not a path."
@@ -421,34 +423,28 @@ export function createRadiusTools(
                     source.repo
                   );
                   if (error) throw new Error(error);
-                  return `recipe:${String(args.target).trim().toLowerCase()}`;
+                  return publication.recipeKey(target);
                 },
-                async (staging, source, guards) => {
-                  const published = await publication.publishRecipe(
-                    source.workspace,
-                    source.repo,
-                    args,
-                    async (target) => {
-                      await guards.prepareSpawn();
-                      return deps.withGhcrDockerConfig((env) => {
-                        guards.assertCurrent();
-                        return deps.rad.runRadBicepPublish({
-                          file: staging.artifact(recipe, true),
-                          target,
-                          env,
-                          log: logToSession,
-                          prepareSpawn: guards.prepareSpawn,
-                          beforeSpawn() {
-                            guards.beforeSpawn();
-                            staging.artifact(recipe, true);
-                          }
-                        });
-                      });
-                    }
-                  );
-                  if (published.kind === "refused")
-                    throw new Error(published.error);
-                  return published;
+                publication.enqueue,
+                async (staging, _, guards) => {
+                  const published = await deps.withGhcrDockerConfig((env) => {
+                    guards.assertCurrent();
+                    return deps.rad.runRadBicepPublish({
+                      file: staging.artifact(recipe, true),
+                      target,
+                      env,
+                      log: logToSession,
+                      prepareSpawn: guards.prepareSpawn,
+                      beforeSpawn() {
+                        guards.beforeSpawn();
+                        staging.artifact(recipe, true);
+                      }
+                    });
+                  });
+                  return {
+                    kind: "published",
+                    reference: String(published)
+                  } as const;
                 }
               )
             : await (async () => {

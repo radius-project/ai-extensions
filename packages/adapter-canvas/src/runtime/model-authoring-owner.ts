@@ -158,7 +158,14 @@ export function createModelAuthoringOwner(ports: {
     },
     async publish<T>(
       token: string,
-      publicationKey: (target: Readonly<AuthoringTarget>) => string,
+      publicationKey: (
+        target: Readonly<AuthoringTarget>,
+        stagingDir: string
+      ) => string,
+      enqueue: <Result>(
+        key: string,
+        work: () => Promise<Result>
+      ) => Promise<Result>,
       start: (
         staging: ManagedModelStaging,
         target: Readonly<AuthoringTarget>,
@@ -173,7 +180,7 @@ export function createModelAuthoringOwner(ports: {
       assertCurrent(request);
       if (request.finalizing)
         throw new Error("The Radius authoring request is already finalizing.");
-      const key = publicationKey(request.target);
+      const key = publicationKey(request.target, request.staging.stagingDir);
       const outcome = { failed: false };
       request.outcomes.set(key, outcome);
       const guards = {
@@ -181,16 +188,15 @@ export function createModelAuthoringOwner(ports: {
         assertCurrent: () => assertCurrent(request),
         beforeSpawn: () => assertCurrentBaseline(request)
       };
-      const publication = (async () => {
-        try {
-          await assertCurrentTarget(request);
-          assertCurrentBaseline(request);
-          return await start(request.staging, request.target, guards);
-        } catch (error) {
-          outcome.failed = true;
-          throw error;
-        }
-      })();
+      // Take the target slot before a slower source read can let later work pass.
+      const publication = enqueue(key, async () => {
+        await assertCurrentTarget(request);
+        assertCurrentBaseline(request);
+        return start(request.staging, request.target, guards);
+      }).catch((error: unknown) => {
+        outcome.failed = true;
+        throw error;
+      });
       request.publications.add(publication);
       try {
         return await drainable(publication);

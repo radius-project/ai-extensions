@@ -41,14 +41,46 @@ function fixture(current = () => true, settled?: (promoted: boolean) => void) {
     resolveTarget: vi.fn(async () => target)
   };
   const validate = vi.fn(async () => {});
-  const owner = createModelAuthoringOwner(ports);
+  const runtime = createModelAuthoringOwner(ports);
+  const enqueue = async <T>(_key: string, work: () => Promise<T>) =>
+    Promise.resolve().then(work);
+  const owner = {
+    ...runtime,
+    publish<T>(
+      token: string,
+      key: Parameters<typeof runtime.publish<T>>[1],
+      start: Parameters<typeof runtime.publish<T>>[3]
+    ) {
+      return runtime.publish(token, key, enqueue, start);
+    }
+  };
   owner.begin("one", target, current, validate, settled);
-  return { owner, target, ports, first, second, validate, committed };
+  return { owner, runtime, target, ports, first, second, validate, committed };
 }
 
 describe("model authoring owner", () => {
   const extension = () => "extension";
 
+  it("counts a queue refusal even when no publication work starts", async () => {
+    const { runtime, ports, validate } = fixture();
+    const start = vi.fn();
+    await expect(
+      runtime.publish(
+        "one",
+        extension,
+        async () => {
+          throw new Error("target blocked");
+        },
+        start
+      )
+    ).rejects.toThrow("target blocked");
+    expect(ports.resolveTarget).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+    await expect(runtime.finish("one")).rejects.toThrow(
+      "required Radius publication failed"
+    );
+    expect(validate).not.toHaveBeenCalled();
+  });
   it("rejects reuse of a live request token without replacing its staging", async () => {
     const { owner, target, first, second, ports, validate } = fixture();
     expect(() => owner.begin("one", target, () => true, validate)).toThrow(
