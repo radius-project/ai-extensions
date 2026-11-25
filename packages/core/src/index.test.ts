@@ -52,6 +52,7 @@ const EXPECTED_FUNCTIONS = [
   "requireCurrentAwsWorkflows",
   "resolveDeployParams",
   "resolveDeployRepairLoop",
+  "nextDeployRunPollDelay",
   "resolveDeployStatus",
   "resolveDeploymentTarget",
   "resolveResourceStatus",

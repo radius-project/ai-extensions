@@ -34,8 +34,7 @@ import {
 import { DELETE_CONFLICT_PATH, deleteConflictUrl } from "../force-delete.js";
 import {
   DELETE_DEPLOYMENT_PATH,
-  DELETE_POLL_LIMIT,
-  DELETE_POLL_MS,
+  DELETE_POLL_MAX_MS,
   DEPLOY_AUTO_HIDE_MS,
   DEPLOY_FAILED_HANDOFF_POLL_LIMIT,
   AWS_REPAIR_BUTTON_ID,
@@ -45,6 +44,8 @@ import {
   DEPLOY_STATUS_PATH,
   DEPLOY_WORKFLOW_POLL_LIMIT,
   DEPLOY_WORKFLOW_POLL_MS,
+  IN_FLIGHT_LIST_REFRESH_MS,
+  IN_FLIGHT_LIST_SLOW_REFRESH_MS,
   LIST_DEPLOYMENTS_PATH,
   RESUME_POLL_LIMIT,
   RESUME_POLL_MS,
@@ -1479,7 +1480,7 @@ describe("delete flow", () => {
       `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
       () => jsonResponse({ deployments: [] })
     );
-    page.browser.clock.tick(DELETE_POLL_MS);
+    page.browser.clock.tick(IN_FLIGHT_LIST_REFRESH_MS);
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).toContain("successfully deleted");
   });
@@ -1523,7 +1524,7 @@ describe("delete flow", () => {
         `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
         () => jsonResponse({ deployments: [] })
       );
-      page.browser.clock.tick(DELETE_POLL_MS);
+      page.browser.clock.tick(IN_FLIGHT_LIST_REFRESH_MS);
       await flushPromises();
       const done = inlineMessage(page.inlineStatus);
       expect(done).toContain("successfully deleted");
@@ -1628,7 +1629,7 @@ describe("delete flow", () => {
         `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
         () => jsonResponse({ deployments: [] })
       );
-      page.browser.clock.tick(DELETE_POLL_MS);
+      page.browser.clock.tick(IN_FLIGHT_LIST_REFRESH_MS);
       await flushPromises();
       const done = inlineMessage(page.inlineStatus);
       expect(done).toContain("successfully deleted");
@@ -1944,13 +1945,13 @@ describe("delete flow", () => {
               });
         }
       );
-      page.browser.clock.tick(DELETE_POLL_MS);
+      page.browser.clock.tick(IN_FLIGHT_LIST_REFRESH_MS);
       await flushPromises();
       expect(inlineMessage(page.inlineStatus)).not.toContain(
         "successfully deleted"
       );
 
-      page.browser.clock.tick(DELETE_POLL_MS);
+      page.browser.clock.tick(IN_FLIGHT_LIST_REFRESH_MS);
       await flushPromises();
       expect(page.tableBody.innerHTML).toContain("Deleting");
     }
@@ -1969,7 +1970,7 @@ describe("delete flow", () => {
       `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
       () => pending.promise
     );
-    page.browser.clock.tick(DELETE_POLL_MS);
+    page.browser.clock.tick(IN_FLIGHT_LIST_REFRESH_MS);
     await flushPromises();
     teardown();
     pending.resolve(jsonResponse({ deployments: [] }));
@@ -2005,7 +2006,7 @@ describe("delete flow", () => {
           ]
         })
     );
-    page.browser.clock.tick(DELETE_POLL_MS);
+    page.browser.clock.tick(IN_FLIGHT_LIST_REFRESH_MS);
     await flushPromises();
     expect(
       inlineMessage(page.inlineStatus).includes("successfully deleted")
@@ -2032,14 +2033,14 @@ describe("delete flow", () => {
           : jsonResponse({ deployments: [] });
       }
     );
-    page.browser.clock.tick(DELETE_POLL_MS);
+    page.browser.clock.tick(IN_FLIGHT_LIST_REFRESH_MS);
     await flushPromises();
-    page.browser.clock.tick(DELETE_POLL_MS);
+    page.browser.clock.tick(IN_FLIGHT_LIST_REFRESH_MS);
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).toContain("successfully deleted");
   });
 
-  it("gives up after the poll cap and reverts the optimistic status", async () => {
+  it("gives up 30 minutes after dispatch and reverts the optimistic status", async () => {
     const { page, button } = await readyWithRow("app", "dev");
     page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
       jsonResponse({ ok: true })
@@ -2048,20 +2049,35 @@ describe("delete flow", () => {
     await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
 
+    let polls = 0;
     page.browser.net.handle(
       `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
-      () =>
-        jsonResponse({
+      () => {
+        polls++;
+        return jsonResponse({
           deployments: [
             { ...knownDeployment("app", "dev", "success"), runUrl: "" }
           ]
-        })
+        });
+      }
     );
-    for (let tick = 0; tick <= DELETE_POLL_LIMIT + 1; tick++) {
-      page.browser.clock.tick(DELETE_POLL_MS);
+    for (
+      let elapsed = 0;
+      elapsed < DELETE_POLL_MAX_MS - IN_FLIGHT_LIST_SLOW_REFRESH_MS;
+      elapsed += IN_FLIGHT_LIST_REFRESH_MS
+    ) {
+      page.browser.clock.tick(IN_FLIGHT_LIST_REFRESH_MS);
+      await flushPromises();
+    }
+    expect(page.browser.clock.pending).toBeGreaterThan(0);
+    expect(page.tableBody.innerHTML).toContain("Deleting");
+    for (let tick = 0; tick < 3; tick++) {
+      page.browser.clock.tick(IN_FLIGHT_LIST_SLOW_REFRESH_MS);
       await flushPromises();
     }
     expect(page.browser.clock.pending).toBe(0);
+    expect(page.tableBody.innerHTML).not.toContain("Deleting");
+    expect(polls).toBeLessThanOrEqual(8 + 28 + 1);
   });
 
   it("ignores a delete dispatch success that resolves after teardown", async () => {
@@ -2102,7 +2118,7 @@ describe("delete flow", () => {
       `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
       () => pollDef.promise
     );
-    page.browser.clock.tick(DELETE_POLL_MS);
+    page.browser.clock.tick(IN_FLIGHT_LIST_REFRESH_MS);
     teardown();
     pollDef.resolve(jsonResponse({ deployments: [] }));
     await flushPromises();
@@ -2123,7 +2139,7 @@ describe("delete flow", () => {
       `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
       () => pollDef.promise
     );
-    page.browser.clock.tick(DELETE_POLL_MS);
+    page.browser.clock.tick(IN_FLIGHT_LIST_REFRESH_MS);
     teardown();
     pollDef.reject(new Error("offline"));
     await flushPromises();
@@ -2491,9 +2507,12 @@ describe("deploy flow", () => {
     page.deployBtn.dispatch("click");
     await flushPromises();
     const before = freshCalls;
-    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
-    await flushPromises();
-    expect(freshCalls).toBeGreaterThan(before);
+    for (let elapsed = 0; elapsed < IN_FLIGHT_LIST_REFRESH_MS;) {
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      elapsed += DEPLOY_WORKFLOW_POLL_MS;
+      await flushPromises();
+    }
+    expect(freshCalls).toBe(before + 1);
 
     page.browser.net.handle(
       `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
@@ -2502,7 +2521,7 @@ describe("deploy flow", () => {
           deployments: [{ app: "app", environment: "dev", status: "pending" }]
         })
     );
-    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    page.browser.clock.tick(IN_FLIGHT_LIST_REFRESH_MS);
     await flushPromises();
     const seen = freshCalls;
     page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
@@ -3854,10 +3873,7 @@ describe("deploy flow", () => {
       await flushPromises();
       page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
       page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
-        jsonResponse({
-          status: "in_progress",
-          deployRunUrl: "https://example.test/run/1"
-        })
+        Promise.reject(new Error("canvas server unavailable"))
       );
       page.deployBtn.dispatch("click");
       await flushPromises();
@@ -4209,7 +4225,7 @@ describe("resuming a redirected forced delete", () => {
       `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
       () => jsonResponse({ deployments: [] })
     );
-    page.browser.clock.tick(DELETE_POLL_MS);
+    page.browser.clock.tick(IN_FLIGHT_LIST_REFRESH_MS);
     await flushPromises();
     const done = inlineMessage(page.inlineStatus);
     expect(done).toContain("successfully deleted");
@@ -4228,6 +4244,948 @@ describe("resuming a redirected forced delete", () => {
     init(page);
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).not.toContain("Force deleting");
+  });
+});
+
+// Measured against real GitHub: one fresh listing for a repository with two
+// environments makes 23 API requests.
+const LISTING_GITHUB_CALLS = 23;
+const LISTING_LATENCY_MS = 5000;
+
+describe("in-flight listing refresh", () => {
+  const freshListing = (repo: string) =>
+    `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(repo)}&fresh=1`;
+
+  // Every request reaches the server, which runs the full lookup even when the
+  // page later aborts it, so each call is a lookup's worth of GitHub requests.
+  const slowListing = (
+    page: ReturnType<typeof fixture>,
+    deployments: () => unknown[]
+  ): number[] => {
+    const startedAt: number[] = [];
+    page.browser.net.handle(freshListing(page.repo), () => {
+      startedAt.push(page.browser.clock.now());
+      return new Promise<HttpResponse>((resolve) => {
+        page.browser.clock.setTimeout(
+          () => resolve(jsonResponse({ deployments: deployments() })),
+          LISTING_LATENCY_MS
+        );
+      });
+    });
+    return startedAt;
+  };
+
+  const advance = async (
+    page: ReturnType<typeof fixture>,
+    milliseconds: number,
+    step: number
+  ): Promise<void> => {
+    for (let elapsed = 0; elapsed < milliseconds; elapsed += step) {
+      page.browser.clock.tick(step);
+      await flushPromises();
+    }
+  };
+
+  const startDeploy = async (): Promise<ReturnType<typeof fixture>> => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "in_progress",
+        attempt: { targetRepo: "octo/app", environment: "dev" }
+      })
+    );
+    return page;
+  };
+
+  const resumeDeploy = (): ReturnType<typeof fixture> => {
+    const page = fixture({ search: "?application=app&environment=dev" });
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        active: true,
+        attempt: { targetRepo: "octo/app", environment: "dev" }
+      })
+    );
+    return page;
+  };
+
+  it.each([
+    ["a deploy started on this page", "click", DEPLOY_WORKFLOW_POLL_MS],
+    ["a redirected deploy", "resume", RESUME_POLL_MS]
+  ] as const)(
+    "keeps GitHub calls for %s within budget for a 60-minute deploy",
+    async (_, entry, step) => {
+      const page = entry === "click" ? await startDeploy() : resumeDeploy();
+      const startedAt = slowListing(page, () => []);
+      if (entry === "click") page.deployBtn.dispatch("click");
+      else init(page);
+      await flushPromises();
+      const begin = page.browser.clock.now();
+      await advance(page, 60 * 60 * 1000, step);
+
+      const perMinute = Array.from(
+        { length: 60 },
+        (_unused, minute) =>
+          startedAt.filter((at) => Math.floor((at - begin) / 60_000) === minute)
+            .length * LISTING_GITHUB_CALLS
+      );
+      expect(Math.max(...perMinute.slice(0, 2))).toBeLessThanOrEqual(
+        5 * LISTING_GITHUB_CALLS
+      );
+      expect(Math.max(...perMinute.slice(2))).toBeLessThanOrEqual(
+        LISTING_GITHUB_CALLS
+      );
+      // With the deploy monitor's own reads this stays well under GitHub's
+      // 5,000 requests an hour.
+      expect(startedAt.length * LISTING_GITHUB_CALLS).toBeLessThanOrEqual(1600);
+    }
+  );
+
+  it.each([
+    ["a deploy started on this page", "click", DEPLOY_WORKFLOW_POLL_MS],
+    ["a redirected deploy", "resume", RESUME_POLL_MS]
+  ] as const)(
+    "shows the real record for %s when a listing outlasts several status ticks",
+    async (_, entry, step) => {
+      const page = entry === "click" ? await startDeploy() : resumeDeploy();
+      let recorded = false;
+      const startedAt = slowListing(page, () =>
+        recorded ?
+          [
+            {
+              ...knownDeployment("app", "dev", "in_progress"),
+              runUrl: "https://github.com/octo/app/actions/runs/7"
+            }
+          ]
+        : []
+      );
+      if (entry === "click") page.deployBtn.dispatch("click");
+      else init(page);
+      await flushPromises();
+      recorded = true;
+      await advance(page, 2 * 60 * 1000, step);
+
+      expect(page.tableBody.innerHTML).toContain(
+        "https://github.com/octo/app/actions/runs/7"
+      );
+      const settled = startedAt.length;
+      await advance(page, 10 * 60 * 1000, step);
+      expect(startedAt.length).toBe(settled);
+    }
+  );
+
+  it.each([
+    ["a deploy started on this page", "click", DEPLOY_WORKFLOW_POLL_MS],
+    ["a redirected deploy", "resume", RESUME_POLL_MS]
+  ] as const)(
+    "keeps refreshing %s every 60 seconds until a late record appears",
+    async (_, entry, step) => {
+      const page = entry === "click" ? await startDeploy() : resumeDeploy();
+      let begin = 0;
+      const startedAt = slowListing(page, () =>
+        page.browser.clock.now() - begin > 3 * 60 * 1000 ?
+          [
+            {
+              ...knownDeployment("app", "dev", "in_progress"),
+              runUrl: "https://github.com/octo/app/actions/runs/7"
+            }
+          ]
+        : []
+      );
+      if (entry === "click") page.deployBtn.dispatch("click");
+      else init(page);
+      begin = page.browser.clock.now();
+      await flushPromises();
+      await advance(page, 4 * 60 * 1000, step);
+
+      expect(startedAt.map((at) => at - begin)).toEqual([
+        0, 15_000, 30_000, 45_000, 60_000, 75_000, 90_000, 105_000, 165_000,
+        225_000
+      ]);
+      expect(page.tableBody.innerHTML).toContain(
+        "https://github.com/octo/app/actions/runs/7"
+      );
+      await advance(page, 10 * 60 * 1000, step);
+      expect(startedAt).toHaveLength(10);
+    }
+  );
+
+  it("waits for a newer listing that replaced an aborted one before refreshing", async () => {
+    const page = await startDeploy();
+    const listings: ReturnType<typeof createDeferred<HttpResponse>>[] = [];
+    page.browser.net.handle(freshListing(page.repo), () => {
+      const listing = createDeferred<HttpResponse>();
+      listings.push(listing);
+      return listing.promise;
+    });
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.progressModal.dispatch("click", { target: page.progressModal });
+    await flushPromises();
+    expect(listings).toHaveLength(2);
+
+    await advance(page, 5 * 60 * 1000, DEPLOY_WORKFLOW_POLL_MS);
+    expect(listings).toHaveLength(2);
+
+    listings[1].resolve(jsonResponse({ deployments: [] }));
+    await flushPromises();
+    await advance(
+      page,
+      IN_FLIGHT_LIST_SLOW_REFRESH_MS,
+      DEPLOY_WORKFLOW_POLL_MS
+    );
+    expect(listings).toHaveLength(3);
+  });
+
+  // While GitHub has created a deployment record but not yet its first status,
+  // the server reports the environment as a diagnostic instead of a row.
+  const diagnosticOnly = (environment: string) => ({
+    deployments: [],
+    environmentDiagnostics: [
+      {
+        environment,
+        kind: "error",
+        message: `Could not identify GitHub deployment 5 for environment ${environment}.`
+      }
+    ]
+  });
+  const recordedDeploy = {
+    deployments: [
+      {
+        ...knownDeployment("app", "dev", "in_progress"),
+        runUrl: "https://github.com/octo/app/actions/runs/7"
+      }
+    ]
+  };
+
+  it.each([
+    ["a deploy started on this page", "click", DEPLOY_WORKFLOW_POLL_MS],
+    ["a redirected deploy", "resume", RESUME_POLL_MS]
+  ] as const)(
+    "shows View Run for %s when the first listing only has a diagnostic",
+    async (_, entry, step) => {
+      const page = entry === "click" ? await startDeploy() : resumeDeploy();
+      let recorded = false;
+      let calls = 0;
+      page.browser.net.handle(freshListing(page.repo), () => {
+        calls++;
+        return jsonResponse(recorded ? recordedDeploy : diagnosticOnly("dev"));
+      });
+      if (entry === "click") page.deployBtn.dispatch("click");
+      else init(page);
+      await flushPromises();
+      expect(page.tableBody.innerHTML).toContain("Could not identify");
+
+      recorded = true;
+      await advance(page, IN_FLIGHT_LIST_REFRESH_MS, step);
+      expect(page.tableBody.innerHTML).toContain(
+        "https://github.com/octo/app/actions/runs/7"
+      );
+      const settled = calls;
+      await advance(page, 5 * 60 * 1000, step);
+      expect(calls).toBe(settled);
+    }
+  );
+
+  it("keeps refreshing a deploy after cleanup details removed the environment's record", async () => {
+    const page = fixture({
+      deploymentsPayload: {
+        deployments: [
+          {
+            app: "",
+            environment: "dev",
+            status: "failed",
+            deploymentId: "4",
+            runUrl: "https://github.com/octo/app/actions/runs/4"
+          }
+        ],
+        environmentDiagnostics: [
+          {
+            environment: "dev",
+            message: "Only the first 100 records were checked."
+          }
+        ]
+      }
+    });
+    const cleanup = createFakeInput("cleanup-details");
+    cleanup.setAttribute("data-env", "dev");
+    page.browser.document.addSelectorAll(".js-cleanup-dep", [cleanup]);
+    page.browser.net.handle("/api/deployment-cleanup-details", () =>
+      jsonResponse({ prepared: false, deployment: null })
+    );
+    init(page);
+    await flushPromises();
+    cleanup.dispatch("click");
+    await flushPromises();
+    expect(inlineMessage(page.inlineStatus)).toContain(
+      "No deployment remains tracked"
+    );
+
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "in_progress",
+        attempt: { targetRepo: "octo/app", environment: "dev" }
+      })
+    );
+    let recorded = false;
+    slowListing(page, () => (recorded ? recordedDeploy.deployments : []));
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    await advance(page, 6000, DEPLOY_WORKFLOW_POLL_MS);
+    recorded = true;
+    await advance(page, 60_000, DEPLOY_WORKFLOW_POLL_MS);
+
+    expect(page.tableBody.innerHTML).toContain(
+      "https://github.com/octo/app/actions/runs/7"
+    );
+  });
+
+  it("keeps refreshing every 60 seconds while the diagnostic lasts", async () => {
+    const page = await startDeploy();
+    const startedAt: number[] = [];
+    page.browser.net.handle(freshListing(page.repo), () => {
+      startedAt.push(page.browser.clock.now());
+      return jsonResponse(diagnosticOnly("dev"));
+    });
+    page.deployBtn.dispatch("click");
+    const begin = page.browser.clock.now();
+    await flushPromises();
+    await advance(page, 6 * 60 * 1000, DEPLOY_WORKFLOW_POLL_MS);
+
+    expect(startedAt.map((at) => at - begin)).toEqual([
+      0, 15_000, 30_000, 45_000, 60_000, 75_000, 90_000, 105_000, 165_000,
+      225_000, 285_000, 345_000
+    ]);
+  });
+
+  it("stops refreshing once the record arrives even with a diagnostic attached", async () => {
+    const page = await startDeploy();
+    let calls = 0;
+    page.browser.net.handle(freshListing(page.repo), () => {
+      calls++;
+      return jsonResponse({
+        ...recordedDeploy,
+        environmentDiagnostics: [
+          {
+            environment: "dev",
+            kind: "incomplete",
+            message: "Only the first 100 deployment records were checked."
+          }
+        ]
+      });
+    });
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    await advance(page, 5 * 60 * 1000, DEPLOY_WORKFLOW_POLL_MS);
+    expect(calls).toBe(1);
+  });
+
+  it("keeps a deploy refresh and a delete poll going through a diagnostic window", async () => {
+    const page = fixture({
+      search: "?application=app&environment=dev",
+      deploymentsPayload: {
+        deployments: [
+          { ...knownDeployment("old", "prod", "success"), runUrl: "" }
+        ]
+      }
+    });
+    const button = deployRowButton("old", "prod");
+    page.browser.document.addSelectorAll(".js-del-dep", [button]);
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        active: true,
+        attempt: { targetRepo: "octo/app", environment: "dev" }
+      })
+    );
+    page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
+      jsonResponse({ success: true })
+    );
+    const prodRow = {
+      ...knownDeployment("old", "prod", "success"),
+      runUrl: ""
+    };
+    let phase: "before" | "window" | "deleted" | "recorded" = "before";
+    let calls = 0;
+    page.browser.net.handle(freshListing(page.repo), () => {
+      calls++;
+      return jsonResponse(
+        phase === "before" ?
+          {
+            deployments: [prodRow],
+            environmentDiagnostics: diagnosticOnly("dev").environmentDiagnostics
+          }
+        : phase === "deleted" ? diagnosticOnly("dev")
+        : phase === "window" ?
+          {
+            deployments: [],
+            environmentDiagnostics: [
+              ...diagnosticOnly("dev").environmentDiagnostics,
+              ...diagnosticOnly("prod").environmentDiagnostics
+            ]
+          }
+        : recordedDeploy
+      );
+    });
+    init(page);
+    await flushPromises();
+    button.dispatch("click");
+    await confirmDeleteDialog(page.deleteBody, "old", "prod");
+    await flushPromises();
+    phase = "window";
+    const windowStart = calls;
+    await advance(page, 60_000, RESUME_POLL_MS);
+    expect(inlineMessage(page.inlineStatus)).not.toContain(
+      "successfully deleted"
+    );
+    expect(page.tableBody.innerHTML).not.toContain("runs/7");
+    // Each keeps its own 15 second cadence, with no extra listing per tick.
+    expect(calls - windowStart).toBeLessThanOrEqual(8);
+
+    // The delete finishes while the deploy's record is still missing, so
+    // only the deploy refresh is left to find it.
+    phase = "deleted";
+    await advance(page, 30_000, RESUME_POLL_MS);
+    expect(inlineMessage(page.inlineStatus)).toContain(
+      "has been successfully deleted"
+    );
+    expect(page.tableBody.innerHTML).not.toContain("runs/7");
+
+    phase = "recorded";
+    await advance(page, 60_000, RESUME_POLL_MS);
+    expect(page.tableBody.innerHTML).toContain(
+      "https://github.com/octo/app/actions/runs/7"
+    );
+    const settled = calls;
+    await advance(page, 5 * 60 * 1000, RESUME_POLL_MS);
+    expect(calls).toBe(settled);
+  });
+
+  it("does not start a refresh while another listing is still loading", async () => {
+    const page = await startDeploy();
+    const pending = createDeferred<HttpResponse>();
+    let calls = 0;
+    page.browser.net.handle(freshListing(page.repo), () => {
+      calls++;
+      return pending.promise;
+    });
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    const aborted = page.browser.net.aborted;
+    await advance(page, 5 * 60 * 1000, DEPLOY_WORKFLOW_POLL_MS);
+    expect(calls).toBe(1);
+    expect(page.browser.net.aborted).toBe(aborted);
+  });
+
+  // The server's watch window counts only waits between GitHub reads, so a
+  // deploy with slow reads can stay in progress well past 70 minutes.
+  it.each([
+    ["a deploy started on this page", "click", DEPLOY_WORKFLOW_POLL_MS],
+    ["a redirected deploy", "resume", RESUME_POLL_MS]
+  ] as const)(
+    "keeps polling %s for as long as the server reports it running",
+    async (_, entry, step) => {
+      const page = entry === "click" ? await startDeploy() : resumeDeploy();
+      slowListing(page, () => []);
+      let finished = false;
+      const running = {
+        status: "in_progress",
+        active: true,
+        attempt: { targetRepo: "octo/app", environment: "dev" }
+      };
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        jsonResponse(
+          finished ? { ...running, status: "success", active: false } : running
+        )
+      );
+      if (entry === "click") page.deployBtn.dispatch("click");
+      else init(page);
+      await flushPromises();
+      await advance(page, 80 * 60 * 1000, 60_000);
+      expect(inlineMessage(page.inlineStatus)).not.toContain(
+        "taking longer than expected"
+      );
+      expect(page.browser.clock.intervals).toBe(1);
+
+      finished = true;
+      await advance(page, step, step);
+      expect(page.browser.clock.intervals).toBe(0);
+    }
+  );
+
+  it.each([
+    ["a deploy started on this page", "click", DEPLOY_WORKFLOW_POLL_MS],
+    ["a redirected deploy", "resume", RESUME_POLL_MS]
+  ] as const)(
+    "restarts the cap for %s each time the server confirms it is running",
+    async (_, entry, step) => {
+      const page = entry === "click" ? await startDeploy() : resumeDeploy();
+      slowListing(page, () => []);
+      let available = false;
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        available ?
+          jsonResponse({
+            status: "in_progress",
+            active: true,
+            attempt: { targetRepo: "octo/app", environment: "dev" }
+          })
+        : Promise.reject(new Error("canvas server unavailable"))
+      );
+      if (entry === "click") page.deployBtn.dispatch("click");
+      else init(page);
+      await flushPromises();
+      const limit =
+        entry === "click" ? DEPLOY_WORKFLOW_POLL_LIMIT : RESUME_POLL_LIMIT;
+      await advance(page, (limit - 1) * step, step);
+      available = true;
+      await advance(page, step, step);
+      available = false;
+      await advance(page, (limit - 1) * step, step);
+      expect(page.browser.clock.intervals).toBe(1);
+
+      await advance(page, 2 * step, step);
+      expect(page.browser.clock.intervals).toBe(0);
+    }
+  );
+});
+
+describe("delete completion poll", () => {
+  const freshListing = (repo: string) =>
+    `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(repo)}&fresh=1`;
+  // The strict listing the poll trusts needs a runUrl on every row.
+  const listed = (app: string, environment: string, status: string) => ({
+    ...knownDeployment(app, environment, status),
+    runUrl: ""
+  });
+  const DELETE_RUN = "https://github.com/octo/app/actions/runs/9";
+  const PREVIOUS_RUN = "https://github.com/octo/app/actions/runs/8";
+
+  const advance = async (
+    page: ReturnType<typeof fixture>,
+    milliseconds: number,
+    step = 1000
+  ): Promise<void> => {
+    for (let elapsed = 0; elapsed < milliseconds; elapsed += step) {
+      page.browser.clock.tick(step);
+      await flushPromises();
+    }
+  };
+
+  // Each fresh listing takes LISTING_LATENCY_MS to answer, as a real GitHub
+  // lookup does, and every request reaches the server even if later aborted.
+  const slowListing = (
+    page: ReturnType<typeof fixture>,
+    deployments: () => unknown[],
+    latency = LISTING_LATENCY_MS
+  ): number[] => {
+    const startedAt: number[] = [];
+    page.browser.net.handle(freshListing(page.repo), () => {
+      startedAt.push(page.browser.clock.now());
+      return new Promise<HttpResponse>((resolve) => {
+        page.browser.clock.setTimeout(
+          () => resolve(jsonResponse({ deployments: deployments() })),
+          latency
+        );
+      });
+    });
+    return startedAt;
+  };
+
+  // A listing started while another was still loading means one of them
+  // was thrown away after the server had already run its GitHub lookup.
+  const overlapping = (
+    startedAt: readonly number[],
+    latency = LISTING_LATENCY_MS
+  ): number[] =>
+    startedAt.filter(
+      (at, index) => index > 0 && at - startedAt[index - 1] < latency
+    );
+
+  const startDelete = async (
+    options: {
+      search?: string;
+      row?: Record<string, unknown>;
+      dispatch?: Record<string, unknown>;
+    } = {}
+  ) => {
+    const row = options.row ?? listed("app", "dev", "success");
+    const page = fixture({
+      search: options.search,
+      deploymentsPayload: { deployments: [row] }
+    });
+    const button = deployRowButton("app", "dev");
+    page.browser.document.addSelectorAll(".js-del-dep", [button]);
+    page.browser.net.handle(freshListing(page.repo), () =>
+      jsonResponse({ deployments: [row] })
+    );
+    const teardown = init(page);
+    await flushPromises();
+    page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
+      jsonResponse(options.dispatch ?? { success: true, runUrl: DELETE_RUN })
+    );
+    return { page, button, teardown, row };
+  };
+
+  const confirm = async (
+    page: ReturnType<typeof fixture>,
+    button: FakeElement
+  ): Promise<number> => {
+    button.dispatch("click");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await flushPromises();
+    return page.browser.clock.now();
+  };
+
+  it("keeps GitHub calls within budget while a slow delete runs", async () => {
+    const { page, button } = await startDelete();
+    const startedAt = slowListing(page, () => [
+      listed("app", "dev", "deleting")
+    ]);
+    const begin = await confirm(page, button);
+    await advance(page, 10 * 60 * 1000);
+
+    const perMinute = Array.from(
+      { length: 10 },
+      (_unused, minute) =>
+        startedAt.filter((at) => Math.floor((at - begin) / 60_000) === minute)
+          .length * LISTING_GITHUB_CALLS
+    );
+    expect(Math.max(...perMinute.slice(0, 2))).toBeLessThanOrEqual(
+      4 * LISTING_GITHUB_CALLS
+    );
+    expect(Math.max(...perMinute.slice(2))).toBeLessThanOrEqual(
+      LISTING_GITHUB_CALLS
+    );
+    expect(overlapping(startedAt)).toEqual([]);
+  });
+
+  it("shows success for a delete that finishes after 4 minutes", async () => {
+    const { page, button } = await startDelete();
+    let begin = 0;
+    page.browser.net.handle(freshListing(page.repo), () =>
+      jsonResponse({
+        deployments:
+          page.browser.clock.now() - begin > 4 * 60 * 1000 ?
+            []
+          : [listed("app", "dev", "deleting")]
+      })
+    );
+    begin = await confirm(page, button);
+    await advance(page, 6 * 60 * 1000);
+
+    expect(inlineMessage(page.inlineStatus)).toContain(
+      "has been successfully deleted"
+    );
+    expect(page.browser.clock.pending).toBe(0);
+  });
+
+  it.each([
+    ["its run", { success: true, runUrl: DELETE_RUN }, DELETE_RUN, "1"],
+    ["a newer record when no run was resolved", { success: true }, "", "2"]
+  ])(
+    "stops and shows the failure when the delete fails, matched by %s",
+    async (_, dispatch, runUrl, deploymentId) => {
+      const { page, button } = await startDelete({
+        row: { ...listed("app", "dev", "success"), deploymentId: "1" },
+        dispatch
+      });
+      let polls = 0;
+      page.browser.net.handle(freshListing(page.repo), () => {
+        polls++;
+        return jsonResponse({
+          deployments: [
+            {
+              ...listed("app", "dev", "delete-failed"),
+              runUrl,
+              deploymentId
+            }
+          ]
+        });
+      });
+      await confirm(page, button);
+      await advance(page, IN_FLIGHT_LIST_REFRESH_MS);
+      const seen = polls;
+
+      expect(inlineMessage(page.inlineStatus)).toContain(
+        "Deleting deployment of application <strong>app</strong> in environment <strong>dev</strong> failed."
+      );
+      expect(page.tableBody.innerHTML).toContain("Delete failed");
+      expect(page.tableBody.innerHTML).not.toContain("Deleting");
+      await advance(page, 5 * 60 * 1000, 15_000);
+      expect(polls).toBe(seen);
+      expect(page.browser.clock.pending).toBe(0);
+    }
+  );
+
+  it("ends a delete at the time limit while a listing never answers", async () => {
+    const { page, button } = await startDelete();
+    page.browser.net.handle(freshListing(page.repo), () =>
+      jsonResponse({ deployments: [listed("app", "dev", "success")] })
+    );
+    const begin = await confirm(page, button);
+    const stalled = createDeferred<HttpResponse>();
+    page.browser.net.handle(freshListing(page.repo), () => stalled.promise);
+    await advance(page, DELETE_POLL_MAX_MS - 60_000, 15_000);
+    expect(page.tableBody.innerHTML).toContain("Deleting");
+
+    await advance(page, 75_000, 15_000);
+    expect(page.browser.clock.now() - begin).toBeGreaterThan(
+      DELETE_POLL_MAX_MS
+    );
+    expect(page.tableBody.innerHTML).not.toContain("Deleting");
+    expect(page.browser.clock.pending).toBe(0);
+
+    stalled.resolve(jsonResponse({ deployments: [] }));
+    await flushPromises();
+    expect(inlineMessage(page.inlineStatus)).not.toContain(
+      "successfully deleted"
+    );
+  });
+
+  it("cancels the next check when the time limit passes between checks", async () => {
+    const { page, button } = await startDelete();
+    // Slow listings shift the checks so one is queued past the time limit.
+    const startedAt = slowListing(page, () => [
+      listed("app", "dev", "success")
+    ]);
+    const begin = await confirm(page, button);
+    await advance(page, DELETE_POLL_MAX_MS - 1000, 1000);
+    expect(page.tableBody.innerHTML).toContain("Deleting");
+
+    // The reload at the time limit answers at once, so a check left queued
+    // would have to start a listing of its own.
+    let instant = 0;
+    page.browser.net.handle(freshListing(page.repo), () => {
+      instant++;
+      return jsonResponse({ deployments: [listed("app", "dev", "success")] });
+    });
+    await advance(page, 1000, 1000);
+    expect(page.browser.clock.now() - begin).toBe(DELETE_POLL_MAX_MS);
+    expect(page.tableBody.innerHTML).not.toContain("Deleting");
+    expect(page.browser.clock.pending).toBe(0);
+    await advance(page, 5 * 60 * 1000, 1000);
+    expect(instant).toBe(1);
+    expect(startedAt.length).toBeGreaterThan(0);
+  });
+
+  it("does not read a failed listing response as a finished delete", async () => {
+    const { page, button } = await startDelete();
+    let failing = true;
+    page.browser.net.handle(freshListing(page.repo), () =>
+      failing ?
+        jsonResponse({ deployments: [] }, false, 503)
+      : jsonResponse({ deployments: [] })
+    );
+    await confirm(page, button);
+    await advance(page, 2 * IN_FLIGHT_LIST_REFRESH_MS);
+    expect(inlineMessage(page.inlineStatus)).not.toContain(
+      "successfully deleted"
+    );
+    expect(page.browser.clock.pending).toBeGreaterThan(0);
+
+    failing = false;
+    await advance(page, IN_FLIGHT_LIST_REFRESH_MS);
+    expect(inlineMessage(page.inlineStatus)).toContain(
+      "has been successfully deleted"
+    );
+  });
+
+  // Guard: passes on the code that introduced it. The strict listing turns an
+  // environment reported only as a diagnostic into an unverified row, so the
+  // poll must never read the missing deployment row as a finished delete.
+  it("never reads a listing with only a diagnostic for the environment as deleted", async () => {
+    const { page, button } = await startDelete();
+    let polls = 0;
+    page.browser.net.handle(freshListing(page.repo), () => {
+      polls++;
+      return jsonResponse({
+        deployments: [],
+        environmentDiagnostics: [
+          {
+            environment: "dev",
+            kind: "error",
+            message:
+              "Could not identify GitHub deployment 5 for environment dev."
+          }
+        ]
+      });
+    });
+    await confirm(page, button);
+    const before = polls;
+    await advance(page, 2 * 60 * 1000, 15_000);
+
+    expect(polls).toBeGreaterThan(before + 3);
+    expect(inlineMessage(page.inlineStatus)).not.toContain(
+      "successfully deleted"
+    );
+    expect(inlineMessage(page.inlineStatus)).not.toContain("failed.");
+    expect(page.tableBody.innerHTML).toContain("Deleting");
+  });
+
+  it.each([
+    ["the deleted record's ID", "&deployment=1", true],
+    ["no deleted record ID", "", false],
+    ["a malformed deleted record ID", "&deployment=1%26x", false]
+  ])(
+    "matches a redirected forced delete's failure without a run by %s",
+    async (_, param, stops) => {
+      const page = fixture({
+        search: `?delete=forced&application=app&environment=dev&run=${param}`
+      });
+      let polls = 0;
+      page.browser.net.handle(freshListing(page.repo), () => {
+        polls++;
+        return jsonResponse({
+          deployments: [
+            {
+              ...listed("app", "dev", "delete-failed"),
+              deploymentId: "2"
+            }
+          ]
+        });
+      });
+      init(page);
+      await flushPromises();
+      await advance(page, 2 * 60 * 1000, 15_000);
+
+      expect(inlineMessage(page.inlineStatus).includes("failed.")).toBe(stops);
+      if (stops) expect(page.browser.clock.pending).toBe(0);
+      else expect(polls).toBeGreaterThan(4);
+    }
+  );
+
+  it("names a failed forced delete handed over from another page", async () => {
+    const page = fixture({
+      search:
+        "?delete=forced&application=app&environment=dev&run=" +
+        encodeURIComponent(DELETE_RUN)
+    });
+    page.browser.net.handle(freshListing(page.repo), () =>
+      jsonResponse({
+        deployments: [
+          {
+            ...listed("app", "dev", "delete-failed"),
+            runUrl: DELETE_RUN
+          }
+        ]
+      })
+    );
+    init(page);
+    await flushPromises();
+    await advance(page, IN_FLIGHT_LIST_REFRESH_MS);
+
+    expect(inlineMessage(page.inlineStatus)).toContain(
+      "Force deleting deployment of application <strong>app</strong> in environment <strong>dev</strong> failed."
+    );
+    expect(inlineMessage(page.inlineStatus)).toContain(DELETE_RUN);
+    expect(page.browser.clock.pending).toBe(0);
+  });
+
+  it.each([
+    ["a previous run's failure", DELETE_RUN, PREVIOUS_RUN, "2"],
+    ["the record that was deleted", "", "", "1"],
+    ["a record with no deployment ID", "", "", ""]
+  ])(
+    "keeps polling past %s",
+    async (_, dispatchedRun, rowRun, deploymentId) => {
+      const { page, button } = await startDelete({
+        row: {
+          ...listed("app", "dev", "delete-failed"),
+          deploymentId: "1",
+          runUrl: PREVIOUS_RUN
+        },
+        dispatch: { success: true, runUrl: dispatchedRun }
+      });
+      let polls = 0;
+      page.browser.net.handle(freshListing(page.repo), () => {
+        polls++;
+        return jsonResponse({
+          deployments: [
+            {
+              ...listed("app", "dev", "delete-failed"),
+              runUrl: rowRun,
+              deploymentId
+            }
+          ]
+        });
+      });
+      await confirm(page, button);
+      const before = polls;
+      await advance(page, 2 * 60 * 1000, 15_000);
+
+      expect(polls).toBeGreaterThan(before + 3);
+      expect(inlineMessage(page.inlineStatus)).not.toContain("failed.");
+      expect(page.tableBody.innerHTML).toContain("Deleting");
+    }
+  );
+
+  it("waits for a deploy refresh already loading instead of starting another listing", async () => {
+    const { page, button } = await startDelete({
+      search: "?application=web&environment=prod"
+    });
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        active: true,
+        attempt: { targetRepo: "octo/app", environment: "prod" }
+      })
+    );
+    const listings: ReturnType<typeof createDeferred<HttpResponse>>[] = [];
+    page.browser.net.handle(freshListing(page.repo), () => {
+      const listing = createDeferred<HttpResponse>();
+      listings.push(listing);
+      return listing.promise;
+    });
+    await advance(page, 5000);
+    await confirm(page, button);
+    expect(listings).toHaveLength(1);
+    listings[0].resolve(
+      jsonResponse({ deployments: [listed("app", "dev", "deleting")] })
+    );
+    await flushPromises();
+
+    // The deploy refresh starts a listing at 15 seconds, and the delete's
+    // first check comes due at 20 seconds while it is still loading.
+    await advance(page, 11_000);
+    expect(listings).toHaveLength(2);
+    await advance(page, 5000);
+    expect(listings).toHaveLength(2);
+
+    listings[1].resolve(jsonResponse({ deployments: [] }));
+    await flushPromises();
+    expect(inlineMessage(page.inlineStatus)).toContain(
+      "has been successfully deleted"
+    );
+    expect(listings).toHaveLength(2);
+  });
+
+  it.each([
+    ["between checks", 1000],
+    ["while waiting on a deploy refresh's listing", IN_FLIGHT_LIST_REFRESH_MS]
+  ])("stops when the page closes mid-delete %s", async (_, closeAfter) => {
+    const { page, button, teardown } = await startDelete({
+      search: "?application=web&environment=prod"
+    });
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        active: true,
+        attempt: { targetRepo: "octo/app", environment: "prod" }
+      })
+    );
+    const startedAt = slowListing(page, () => []);
+    await confirm(page, button);
+    await advance(page, closeAfter);
+    teardown();
+    const requests = page.browser.net.calls.length;
+    await advance(page, 10 * 60 * 1000);
+
+    expect(page.browser.net.calls.length).toBe(requests);
+    expect(startedAt.length).toBeGreaterThan(0);
+    expect(inlineMessage(page.inlineStatus)).not.toContain(
+      "successfully deleted"
+    );
+    expect(page.browser.clock.pending).toBe(0);
   });
 });
 
@@ -4338,10 +5296,7 @@ describe("resuming a redirected deployment", () => {
   it("gives up after the resume poll cap", async () => {
     const page = fixture({ search: "?application=app&environment=dev" });
     page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
-      jsonResponse({
-        active: true,
-        attempt: { targetRepo: "octo/app", environment: "dev" }
-      })
+      Promise.reject(new Error("canvas server unavailable"))
     );
     init(page);
     await flushPromises();

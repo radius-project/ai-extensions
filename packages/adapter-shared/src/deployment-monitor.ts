@@ -1,7 +1,8 @@
 import type { DeployProgress } from "@radius-project/core";
 import {
   DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE,
-  DEPLOYMENT_MONITOR_LIMITS
+  DEPLOYMENT_MONITOR_LIMITS,
+  nextDeployRunPollDelay
 } from "@radius-project/core";
 import {
   confirmedWorkflowConclusion,
@@ -176,7 +177,6 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployMonitorDependencies)[] = [
 const {
   statusPollMs: STATUS_POLL_MS,
   discoveryAttempts: RUN_DISCOVERY_ATTEMPTS,
-  runPollAttempts: RUN_POLL_ATTEMPTS,
   pollIntervalMs: POLL_INTERVAL_MS,
   heartbeatMs: HEARTBEAT_MS,
   pendingFallbackMs: PENDING_FALLBACK_MS
@@ -470,7 +470,16 @@ export function createDeployMonitorService(
       publishProgress();
     };
 
-    for (let p = 0; p < RUN_POLL_ATTEMPTS; p++) {
+    let waitedMs = 0;
+    const waitForNextPoll = async (): Promise<boolean> => {
+      const delay = nextDeployRunPollDelay(waitedMs);
+      if (delay === null) return false;
+      waitedMs += delay;
+      await sleep(delay);
+      return true;
+    };
+
+    do {
       assertCurrent();
       observation = entry.observation?.observe();
       if (observation)
@@ -496,7 +505,7 @@ export function createDeployMonitorService(
           );
           protectionNotice = "";
         }
-        await sleep(POLL_INTERVAL_MS);
+        // Jumps to the loop condition, which waits for the next poll.
         continue;
       }
       const nextProtectionNotice =
@@ -638,8 +647,7 @@ export function createDeployMonitorService(
         publishProgress();
         return;
       }
-      await sleep(POLL_INTERVAL_MS);
-    }
+    } while (await waitForNextPoll());
     stopUnconfirmed(completionObserved);
   };
   return { run, observe: (request, execution) => run(request, execution) };

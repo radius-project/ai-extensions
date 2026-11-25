@@ -38,6 +38,11 @@ import {
   settleDeployStatuses
 } from "@radius-project/core";
 
+// A full watch window: 60 polls 5s apart for the first 5 minutes, then 220
+// polls 15s apart up to 60 minutes, plus the read at the end of the window.
+const WATCH_SLEEPS = 280;
+const WATCH_READS = WATCH_SLEEPS + 1;
+
 // A deterministic clock: every read advances by one tick, so the heartbeat and
 // the pending-node fallback can be driven without a real timer.
 function clock(step = 1000) {
@@ -101,6 +106,14 @@ function dependencies(
     now: () => 1_700_000_000_000,
     ...overrides
   };
+}
+
+// GitHub scopes a run read to one repository and run; answer only the run the
+// default fakes dispatched and found.
+function trackedRun(repo: string, runId: number | string): Promise<void> {
+  if (repo !== "acme/widgets" || String(runId) !== "77")
+    return Promise.reject(new Error(`Unexpected run read: ${repo} ${runId}`));
+  return Promise.resolve();
 }
 
 function reader(): DeployMonitorStatusReader {
@@ -419,7 +432,7 @@ describe("protection observation narration", () => {
         getRunDetail
       })
     ).run(f.request);
-    expect(getRunDetail).toHaveBeenCalledTimes(240);
+    expect(getRunDetail).toHaveBeenCalledTimes(WATCH_READS);
     expect(
       f.logs.filter((line) => line.includes("is waiting on protection rules"))
     ).toHaveLength(1);
@@ -700,15 +713,14 @@ describe("workflow evidence uncertainty", () => {
             reads++;
             return { status: "completed", conclusion, steps: [] };
           },
-          sleep: async (ms) => {
-            expect(ms).toBe(5000);
+          sleep: async () => {
             sleeps++;
           },
           settleDeployStatuses
         })
       ).run(input);
-      expect(reads).toBe(240);
-      expect(sleeps).toBe(240);
+      expect(reads).toBe(WATCH_READS);
+      expect(sleeps).toBe(WATCH_SLEEPS);
       expect(state.deployStatus).toBe("failed");
       expect(state.deployErrorKind).toBe("run-unconfirmed");
       expect(state.deployError).toBe(
@@ -867,8 +879,8 @@ describe("workflow evidence uncertainty", () => {
       await createDeployMonitorService(
         dependencies({ getRunDetail, sleep, settleDeployStatuses })
       ).run(input);
-      expect(getRunDetail).toHaveBeenCalledTimes(240);
-      expect(sleep).toHaveBeenCalledTimes(240);
+      expect(getRunDetail).toHaveBeenCalledTimes(WATCH_READS);
+      expect(sleep).toHaveBeenCalledTimes(WATCH_SLEEPS);
       expect(state.deployError).toBe(
         "Timed out waiting for the deploy workflow to complete. It may still be running — view it at https://github.com/acme/widgets/actions/runs/77"
       );
@@ -893,11 +905,11 @@ describe("workflow evidence uncertainty", () => {
       );
       const first = request({ resources: [{ name: "db" }] });
       await service.run(first.request);
-      expect(reads).toBe(240);
+      expect(reads).toBe(WATCH_READS);
       expect(first.state.deployError).toContain(explanation);
       const second = request({ resources: [{ name: "db" }] });
       await service.run(second.request);
-      expect(reads).toBe(480);
+      expect(reads).toBe(2 * WATCH_READS);
       expect(second.state.deployError).toContain("It may still be running");
     }
   );
@@ -2035,7 +2047,7 @@ describe("deploy monitor settlement", () => {
 
     await service.run(input);
 
-    expect(polls).toBe(240);
+    expect(polls).toBe(WATCH_READS);
     expect(state.deployStatus).toBe("failed");
     expect(state.deployErrorKind).toBe("run-unconfirmed");
     expect(state.deployError).toContain(
@@ -2045,6 +2057,72 @@ describe("deploy monitor settlement", () => {
       "⚠ Timed out waiting for the deploy workflow to complete."
     );
   });
+
+  it("keeps watching a deploy that runs past 20 minutes and settles its real outcome", async () => {
+    let waited = 0;
+    const settle = settleRecorder();
+    const { request: input, state, logs } = request({ resources: [] });
+    await createDeployMonitorService(
+      dependencies({
+        plannedGraph: { recover: () => Promise.resolve(null) },
+        getRunDetail: (repo, runId) =>
+          trackedRun(repo, runId).then(() =>
+            waited < 45 * 60 * 1000 ?
+              { status: "in_progress", conclusion: null, steps: [] }
+            : completedRun()
+          ),
+        sleep: async (ms) => {
+          waited += ms;
+        },
+        outcome: settle.outcome
+      })
+    ).run(input);
+
+    expect(settle.calls).toHaveLength(1);
+    expect(settle.calls[0]).toMatchObject({
+      status: "completed",
+      conclusion: "success"
+    });
+    expect(state.deployErrorKind).toBeUndefined();
+    expect(logs.join("\n")).not.toContain("Timed out");
+  });
+
+  it.each([
+    ["a running run", { status: "in_progress", conclusion: null, steps: [] }],
+    ["unavailable run detail", null]
+  ])(
+    "watches %s for 60 minutes, every 5 seconds for 5 minutes and every 15 seconds after",
+    async (_, detail) => {
+      const sleeps: number[] = [];
+      let reads = 0;
+      const { request: input, state } = request({ resources: [] });
+      await createDeployMonitorService(
+        dependencies({
+          plannedGraph: { recover: () => Promise.resolve(null) },
+          getRunDetail: async (repo, runId) => {
+            await trackedRun(repo, runId);
+            reads++;
+            return detail as DeployRunDetail | null;
+          },
+          // Wall time jumps an hour on every read; the window counts only
+          // the waits between polls.
+          now: (() => {
+            let at = 1_700_000_000_000;
+            return () => (at += 60 * 60 * 1000);
+          })(),
+          sleep: async (ms) => {
+            sleeps.push(ms);
+          }
+        })
+      ).run(input);
+
+      expect(sleeps.slice(0, 60)).toEqual(Array(60).fill(5000));
+      expect(sleeps.slice(60)).toEqual(Array(220).fill(15000));
+      expect(sleeps.reduce((total, ms) => total + ms, 0)).toBe(60 * 60 * 1000);
+      expect(reads).toBe(sleeps.length + 1);
+      expect(state.deployErrorKind).toBe("run-unconfirmed");
+    }
+  );
 
   it("settles the graph when it gives up watching, so no node is left in flight", async () => {
     // Exception 5.1: this path never reaches the outcome service's terminal

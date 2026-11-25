@@ -749,6 +749,11 @@ export function initializeDeployedGraphPage(
         : `Deleting application ${application} from ${environment} with rad app delete. This may take a few minutes.`;
     }
     if (modal) modal.style.display = "flex";
+    // The record being deleted, so the Deployments page can tell this
+    // delete's failure from an earlier one when no run is resolved.
+    const previousRecord =
+      recoveryTargets.get(deploymentKey(application, environment)) ??
+      recoveryTargets.get(deploymentKey("", environment));
     void context.net
       .fetch("/api/delete-deployment", {
         method: "POST",
@@ -781,7 +786,7 @@ export function initializeDeployedGraphPage(
         // travels with it, since the deleting row carries no run URL.
         context.nav.assign(
           force ?
-            `/?page=deploying&delete=forced&application=${encodeURIComponent(application)}&environment=${encodeURIComponent(environment)}&run=${encodeURIComponent(readString(payload, "runUrl"))}`
+            `/?page=deploying&delete=forced&application=${encodeURIComponent(application)}&environment=${encodeURIComponent(environment)}&run=${encodeURIComponent(readString(payload, "runUrl"))}${previousRecord?.deploymentId ? `&deployment=${encodeURIComponent(previousRecord.deploymentId)}` : ""}`
           : "/?page=deploying"
         );
       })

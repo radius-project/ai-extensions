@@ -240,7 +240,7 @@ describe("shared deployment without a frontend", () => {
         }
       })
     ).run(f.input);
-    expect(reads).toBe(240);
+    expect(reads).toBe(281);
     expect(f.state.deployStatus).toBe("failed");
     expect(f.state.deployErrorKind).toBe("run-unconfirmed");
     expect(f.state.deployHandoffState).toBeUndefined();

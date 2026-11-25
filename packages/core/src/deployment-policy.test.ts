@@ -3,6 +3,7 @@ import {
   classifyDeployDispatchFailure,
   deploymentHandoffEligible,
   deploymentNoticeEligible,
+  nextDeployRunPollDelay,
   resolveDeployRepairLoop,
   shouldRetryWithKeyringCredential
 } from "./deployment-policy.js";
@@ -186,6 +187,24 @@ describe("dispatch uncertainty and credential policy", () => {
     "permits only proven missing-scope fallback: %j",
     ({ expected, ...input }) => {
       expect(shouldRetryWithKeyringCredential(input)).toBe(expected);
+    }
+  );
+});
+
+describe("deploy run watch window", () => {
+  it.each([
+    [0, 5000],
+    [295_000, 5000],
+    [299_999, 5000],
+    [300_000, 15000],
+    [3_585_000, 15000],
+    [3_599_999, 15000],
+    [3_600_000, null],
+    [3_700_000, null]
+  ])(
+    "after %i ms of waiting, delays the next poll by %s ms",
+    (waited, delay) => {
+      expect(nextDeployRunPollDelay(waited)).toBe(delay);
     }
   );
 });

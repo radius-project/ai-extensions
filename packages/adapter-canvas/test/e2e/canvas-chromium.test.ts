@@ -9423,6 +9423,93 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#deploy-progress-modal")).toBeHidden();
   });
 
+  test("shows the real deployment row when a fresh listing outlasts several status ticks in Chromium", async ({
+    page,
+    canvas
+  }) => {
+    let freshListings = 0;
+    const runUrl = `https://github.com/${REPOSITORY}/actions/runs/7`;
+    await page.route("**/api/deploy", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true })
+      });
+    });
+    let statusPolls = 0;
+    await page.route("**/api/deploy-status", (route) => {
+      statusPolls++;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "in_progress",
+          deployRunUrl: runUrl,
+          attempt: {
+            targetRepo: REPOSITORY,
+            environment: "fixture-environment"
+          }
+        })
+      });
+    });
+    await page.route("**/api/list-deployments**", async (route) => {
+      const query = new URL(route.request().url()).searchParams;
+      // The listing is scoped to one repository; only a fresh listing skips
+      // the server's cache and sees the new deployment record.
+      if (query.get("repo") !== REPOSITORY) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ deployments: [], error: "Wrong repository" })
+        });
+        return;
+      }
+      if (query.get("fresh") !== "1") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ deployments: [] })
+        });
+        return;
+      }
+      freshListings++;
+      // A real fresh listing runs a full GitHub lookup that outlasts the
+      // page's 2.5 second status tick.
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      await route
+        .fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            deployments: [
+              {
+                app: "radius-app",
+                environment: "fixture-environment",
+                status: "in_progress",
+                runUrl,
+                identity: { state: "known", application: "radius-app" }
+              }
+            ]
+          })
+        })
+        .catch(() => {});
+    });
+
+    await gotoCanvas(page, canvas, "deploying");
+    const deployNow = page.locator("#deploy-now-btn:not([disabled])");
+    await expect(deployNow).toHaveText("Deploy");
+    await deployNow.click();
+
+    await expect(
+      page.locator(`#deploy-table-body a[href="${runUrl}"]`)
+    ).toBeVisible({ timeout: 12_000 });
+    expect(freshListings).toBe(1);
+    // Once the real row is shown, later status ticks start no more listings.
+    const polls = statusPolls;
+    await expect.poll(() => statusPolls).toBeGreaterThan(polls + 1);
+    expect(freshListings).toBe(1);
+  });
+
   test("does not show deployment-started notification when workflow startup fails in Chromium", async ({
     page,
     canvas

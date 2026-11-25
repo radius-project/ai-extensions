@@ -52,7 +52,13 @@ interface FixtureOptions {
   appListing?: Listing;
   envListing?: Listing;
   deploymentsListing?: Listing;
-  deployments?: Array<{ app: string; environment: string; status: string }>;
+  deployments?: Array<{
+    app: string;
+    environment: string;
+    status: string;
+    deploymentId?: string;
+    identity?: { state: string; application: string };
+  }>;
   search?: string;
 }
 
@@ -1807,52 +1813,71 @@ describe("initializeDeployedGraphPage", () => {
 
   // The redirect hands the delete to the Deployments page; a forced one has to
   // arrive there still forced, or its completion drops the orphan caution.
-  it("carries the forced delete and its run into the Deployments page", async () => {
-    const page = fixture({
-      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
-    });
-    const { browser, action, appSelect, envSelect } = page;
-    const { createDialog } = createConfirmingDialog();
-    browser.net.handle(
-      deleteConflictUrl({
-        repo: "octo/app",
-        environment: "dev",
-        application: "app"
-      }),
-      () =>
-        jsonResponse({
-          conflict: true,
-          resourceState: "Updating",
-          forced: false,
-          detail: ""
-        })
-    );
-    browser.net.handle("/api/delete-deployment", () =>
-      jsonResponse({ runUrl: "https://github.com/octo/app/actions/runs/42" })
-    );
-    initializeDeployedGraphPage(
-      browser.context,
-      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
-    );
-    await flushPromises();
+  it.each([
+    ["unverified", undefined, "https://github.com/octo/app/actions/runs/42"],
+    [
+      "known",
+      { state: "known", application: "app" },
+      "https://github.com/octo/app/actions/runs/42"
+    ],
+    ["unverified", undefined, ""],
+    ["known", { state: "known", application: "app" }, ""]
+  ])(
+    "carries the forced delete and the %s record into the Deployments page (case %#)",
+    async (_, identity, runUrl) => {
+      const page = fixture({
+        deployments: [
+          {
+            app: "app",
+            environment: "dev",
+            status: "delete-failed",
+            deploymentId: "11",
+            identity
+          }
+        ]
+      });
+      const { browser, action, appSelect, envSelect } = page;
+      const { createDialog } = createConfirmingDialog();
+      browser.net.handle(
+        deleteConflictUrl({
+          repo: "octo/app",
+          environment: "dev",
+          application: "app"
+        }),
+        () =>
+          jsonResponse({
+            conflict: true,
+            resourceState: "Updating",
+            forced: false,
+            detail: ""
+          })
+      );
+      browser.net.handle("/api/delete-deployment", () =>
+        jsonResponse({ runUrl })
+      );
+      initializeDeployedGraphPage(
+        browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
 
-    appSelect.value = "app";
-    envSelect.value = "dev";
-    action.dispatch("click");
-    await flushPromises();
-    page.confirm["env-confirm-ok"].dispatch("click");
-    await flushPromises();
+      appSelect.value = "app";
+      envSelect.value = "dev";
+      action.dispatch("click");
+      await flushPromises();
+      page.confirm["env-confirm-ok"].dispatch("click");
+      await flushPromises();
 
-    const redirect = browser.nav.assigned.find((url) =>
-      url.includes("page=deploying")
-    );
-    expect(redirect).toContain("delete=forced");
-    expect(redirect).toContain("application=app");
-    expect(redirect).toContain("environment=dev");
-    expect(redirect).toContain(
-      `run=${encodeURIComponent("https://github.com/octo/app/actions/runs/42")}`
-    );
-  });
+      const redirect = browser.nav.assigned.find((url) =>
+        url.includes("page=deploying")
+      );
+      expect(redirect).toContain("delete=forced");
+      expect(redirect).toContain("application=app");
+      expect(redirect).toContain("environment=dev");
+      expect(redirect).toContain(`run=${encodeURIComponent(runUrl)}`);
+      expect(redirect).toContain("&deployment=11");
+    }
+  );
 
   // The probe downloads a workflow artifact server-side, so the button says it
   // is working and a second click cannot start a second probe.

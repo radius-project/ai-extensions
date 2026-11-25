@@ -11,11 +11,27 @@ export const DEPLOY_REPAIR_ATTEMPT_CAP = 5;
 export const DEPLOYMENT_MONITOR_LIMITS = {
   statusPollMs: 15000,
   discoveryAttempts: 24,
-  runPollAttempts: 240,
   pollIntervalMs: 5000,
+  // Deploy workflows set no job timeout, and slow cloud resources such as RDS
+  // instances can keep a healthy run going well past 20 minutes.
+  runWatchMs: 60 * 60 * 1000,
+  fastRunPollMs: 5 * 60 * 1000,
+  slowPollIntervalMs: 15000,
   heartbeatMs: 30000,
   pendingFallbackMs: 25000
 } as const;
+
+/**
+ * Delay before the next poll of a tracked deploy run, or null once the watch
+ * window is spent. The window counts only time spent waiting between polls, so
+ * slow reads extend it rather than cut it short.
+ */
+export function nextDeployRunPollDelay(waitedMs: number): number | null {
+  const { runWatchMs, fastRunPollMs, pollIntervalMs, slowPollIntervalMs } =
+    DEPLOYMENT_MONITOR_LIMITS;
+  if (waitedMs >= runWatchMs) return null;
+  return waitedMs < fastRunPollMs ? pollIntervalMs : slowPollIntervalMs;
+}
 
 export function shouldRetryWithKeyringCredential(input: {
   stderr?: string;
