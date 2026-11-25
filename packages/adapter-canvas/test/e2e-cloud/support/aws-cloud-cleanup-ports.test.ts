@@ -669,16 +669,19 @@ describe("createGhCleanupGitHub", () => {
 
 describe("createKubectlCleanupKubernetes", () => {
   const CLUSTER = { region: "us-east-2", name: "main" };
+  // The port joins the path with the platform's separator.
+  const KUBECONFIG = path.join("/tmp/kube", "us-east-2-main.kubeconfig");
 
   function kubectl(answers: Record<string, CommandResult>) {
     const calls: string[][] = [];
     const port = createKubectlCleanupKubernetes({
       run: async (command, args) => {
         calls.push([command, ...args]);
-        const answer =
-          answers[
-            `${command} ${args.find((arg) => !arg.startsWith("-") && !arg.includes("/tmp"))}`
-          ];
+        const subcommand = args.find(
+          (arg, index) =>
+            !arg.startsWith("-") && args[index - 1] !== "--kubeconfig"
+        );
+        const answer = answers[`${command} ${subcommand}`];
         return answer ?? OK({});
       },
       directory: async () => "/tmp/kube"
@@ -699,13 +702,13 @@ describe("createKubectlCleanupKubernetes", () => {
       "--name",
       "main",
       "--kubeconfig",
-      "/tmp/kube/us-east-2-main.kubeconfig"
+      KUBECONFIG
     ]);
     expect(calls.filter((call) => call[0] === "aws")).toHaveLength(1);
     expect(calls[1]).toEqual([
       "kubectl",
       "--kubeconfig",
-      "/tmp/kube/us-east-2-main.kubeconfig",
+      KUBECONFIG,
       "get",
       "deployments,statefulsets,daemonsets,services,horizontalpodautoscalers,jobs,serviceaccounts,replicasets,pods",
       "--all-namespaces",
