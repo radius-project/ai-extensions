@@ -27,9 +27,9 @@ Every change also faces the same approval bar. A one-word docs fix needs the sam
 
 ## Proposal
 
-Not every change needs a human reviewer. A pull request from a trusted contributor (a member of the maintainers or approvers team) can merge without human approval when it passes every required check and *is plainly low risk*, such as a docs change or a test that runs without credentials.
+The next enforcement stage, **Stage 5**, requires a human approval from `radius-project/approvers-ai-extensions` for every pull request targeting the protected default branch. Use GitHub's native required-team reviewer rule first, subject to the qualification and activation gates in [Step 4.3](#step-43-require-native-approvers-team-human-approval). Repository preparation does not activate that rule.
 
-Every other pull request still needs a human. For those, automation should point to the riskiest parts of the diff, so the reviewer starts there instead of reading the whole change.
+Allowing low-risk changes from trusted contributors to merge on Copilot approval remains a later proposal, not a Stage 5 exception. Defer its App/evaluator, trusted-author and agent-origin checks, approval globs, and Copilot approval credit. Automation should point human reviewers to the riskiest parts of each diff without deciding who may approve.
 
 We can do this work in four phases:
 
@@ -47,12 +47,12 @@ We want reviews to move faster without getting careless. To get there, we must:
 - **Build trust in our automated checks.** They should catch regressions, security bugs, and broken builds at three points: before a pull request opens, when it opens, and on every later push.
 - **Classify each change's risk automatically.** The paths a change touches set its tier. A docs fix or a new unit test is low risk; a change to `packages/core` or to the workflow generators is higher.
 - **Show human reviewers where to look.** When a pull request needs a human, automation should flag its riskiest parts so the reviewer starts there.
-- **Define trusted contributors.** Only members of the maintainers and approvers teams may merge low-risk changes on an automated approval. Everyone else's pull requests must get human review.
+- **Keep approval authority explicit.** Stage 5 requires an approvers-team human regardless of author, tier, or labels. Any later trusted-author exception needs a separate design and rollout.
 - **Expect to revise this.** We won't get it right the first time and will need to revise as the tools and models available to us change.
 
 ### Non-goals
 
-We will not let any change merge without a human approval until Step 4.5's trial succeeds and its other conditions are met. After that, only low-risk changes from trusted authors may merge on a Copilot approval. As we continue to gather data and iterate on our process, we may consider whether we will allow Copilot approvals on medium risk changes from trusted contributors. Step 4.7 covers how we suspend Copilot approvals if one goes wrong, and how we decide to turn them back on.
+Stage 5 does not enable Copilot approval credit or implement a custom approval service, App-owned check, workflow relay, or observation publisher. Steps 4.5–4.7 describe deferred work: their trial and enforcement conditions, plus separate authorization, must be satisfied before any change may merge without a human approval. A later design must resolve how a Low exception interacts with the blanket team requirement; do not weaken that requirement now for a hypothetical exception.
 
 ## Design
 
@@ -249,7 +249,7 @@ Stage 4 repository preparation uses one executable path table in [`scripts/revie
 
 High overrides cover the shared-adapter deployment implementation family, including repository access, command bindings, and production/runtime composition, not only its Canvas wrappers. They also cover core credential redaction, cloud identity verification, authenticated discovery, credential-cache persistence, Canvas deployment routes/services and runtime/tool wiring, and the collocated tests for these boundaries. Cloud-loaded helpers outside `test/e2e-cloud` include the shared Canvas harness, discovery contract, and production/deployment runtime test factories.
 
-**All tiers retain one qualifying approvers-team human approval.** High additionally calls for a manually requested Max review, not a second human. Labels/comments are advisory and do not verify approval or membership. The eventual Low exception below remains gated by later enforcement, trial, and activation work.
+**All tiers require one qualifying approvers-team human approval under the selected policy.** Step 4.3 prepares native enforcement; it is not yet activated. High additionally calls for a manually requested Max review, not a second human. The existing extra-approval rule for unattributed Copilot PRs remains a separate exception that can require two humans. Labels/comments are advisory and do not verify approval or membership. The eventual Low exception below remains deferred.
 
 Each high-tier path is there for a specific reason:
 
@@ -275,11 +275,41 @@ Base-only pushes do not trigger reconciliation. If a base update changes an open
 
 Failure of the final pre-write snapshot read still permits preparation cleanup if a subsequent read verifies the original snapshot. A successfully read but changed snapshot does not. Recovery evidence remains readable JSON in an indented code block; invisible controls are encoded as JSON Unicode escapes rather than HTML entities. Pagination accepts the repository's verified numeric-ID links as well as its owner/name links, while rejecting foreign repositories, endpoints, origins, and malformed page queries.
 
-#### Step 4.3: Enforce the high tier
+#### Step 4.3: Require native approvers-team human approval
 
-We should propose a section of sensitive paths in the synced `CODEOWNERS` template in `radius-project/.github`, so a code owner must approve any high-tier change.
+Stage 5 uses [GitHub's native required reviewers](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#required-reviewers), separately from CODEOWNERS and risk labels. Human authority means active membership in `radius-project/approvers-ai-extensions`, not trusted authorship or generic repository access. Maintainers-only, on-call-only, and temporary-write-access approval cannot satisfy this policy alone, including for dependency PRs.
 
-The `main` ruleset already requires one approval of the latest push, and the approval globs (Step 4.5) keep Copilot's approval from counting when any high-tier file changes, so that approval must come from a human. Nothing that enforces merge reads the `risk:high` label, because anyone with triage access can change a label.
+Read-only inspection on November 13, 2026 found repository ruleset `18178381` active on `~DEFAULT_BRANCH`, with `required_reviewers: []`. Team `18223393` (`approvers-ai-extensions`) has repository write permission, which GitHub requires for team approvals. Prepare one required-reviewer entry with one approval from that team and candidate file pattern `**`, with no exclusions. The [REST schema](https://docs.github.com/en/rest/repos/rules#update-a-repository-ruleset) defines `file_patterns`, `minimum_approvals`, and `reviewer` (`id` and `type: Team`). This is a proposed configuration, not evidence that the pattern covers every changed path or that native authorization meets all cases below.
+
+The current synced CODEOWNERS already lists the approvers team on the catch-all and every exception. Do not edit it downstream or propose an upstream rewrite for this human-only stage. One ordinary, non-author approvers-team review should satisfy the team requirement, native approval count, and CODEOWNERS together, subject to the retained latest-push rules. Prove this in isolation rather than adding another human requirement for High.
+
+Preserve all existing protections: one ordinary approval, code-owner review, stale-review dismissal, latest-push approval, resolved threads, squash-only merges, signatures, deletion/non-fast-forward/linear-history rules, and the seven strict status contexts with their integration IDs. Keep `require_extra_approval_for_unattributed_changes` enabled: an unattributed Copilot PR can still need two human approvals, at least one from the approvers team. Existing organization-admin (`always`) and repository-admin (`pull_request`) bypasses remain exceptions; admin success cannot prove ordinary-user enforcement.
+
+Native review validity is diff/push-based, **not exact-head-SHA matching**. A diff-changing push or merge-base update can invalidate an approval; a head change GitHub considers non-invalidating may retain it. Qualify stale-diff dismissal and approval by someone other than the latest reviewable pusher, including when an approver pushed the change.
+
+##### Qualify before activation
+
+Obtain separate authorization naming the isolated organization repository, team mapping, non-bypass identities, allowed settings changes, reviews/merge attempts, cleanup, and evidence storage. A personal repository cannot qualify an organization-team rule. Use actual GitHub rule evaluation and expressly authorized controlled merge attempts, not a local matcher, green workflow, or screenshot alone. Record each case's immutable ID, PR/head/base, rules snapshot, team state, actor/bypass status, expected result, and observed evidence.
+
+- **Ordinary authority:** one qualifying human suffices for representative Low, Medium, and High PRs with other requirements satisfied. No approval, author self-review, bot/Copilot-only review, trusted authorship, maintainer-only or on-call-only review, labels, review text, and `author_association` cannot substitute.
+- **Blanket path coverage:** prove root/nested files, dotfiles, `.github/**`, agent instructions, ordinary/credentialed tests, unknown paths, deletions, and renames into and out of sensitive paths. Do not equate `**` with the advisory regex classifier or assume documentation proves coverage.
+- **Review lifecycle:** exercise diff-changing pushes, update-branch/merge-base changes, dismissed approvals, later changes requested, valid reapproval, and no-diff head changes. Record when native approval remains valid and prove the ordinary one-human latest-push case.
+- **Revoked authority:** remove an approving member while leaving their review intact; prove authority no longer counts at merge time. Re-add them and observe reapproval requirements. Also test team write-access removal, team rename/deletion, organization-membership removal, pending invitations, and inherited/nested membership where supported. Permission failure must not silently disable the rule.
+- **PR isolation:** PRs sharing a head SHA cannot borrow approval, including a new PR opened after another was approved and different/retargeted bases. GitHub's generic same-head pending/rejected-review guard is not sufficient proof of approval-authority isolation.
+- **PR variants and exceptions:** cover same-repository/fork PRs, drafts, reopened PRs, stacked-base retargets, the retained unattributed-Copilot extra approval, and configured bypass actors. Only matching protected branch targets are covered, not every feature branch.
+- **Failure and rollback:** prove rule read-back and permission/unavailability failures do not relax authority, and rehearse rollback. There is no custom publisher to fail, but native merge-time authorization still needs proof.
+
+Membership revocation, stale/latest-push behavior, path coverage, and same-commit PR isolation remain unproven. Do not accept a polling-delay window for revoked authority, invalidated reviews, or borrowed approval. If native behavior or available evidence cannot establish the contract, **stop before activation** and obtain a new design decision; do not automatically resurrect an App.
+
+##### Authorize, activate, and roll back narrowly
+
+Repository preparation, isolated authorization, qualification, production authorization, activation/read-back, and rollback rehearsal are separate milestones. Merging this document completes none of the operational milestones. Operational owners are @nicolejms (primary admin) and @nellshamrell (backup admin and implementation/tracker lead); verify current ownership and access before acting.
+
+After isolated qualification passes, obtain explicit authorization for the exact production entry. Immediately re-read current rules, inherited protections, team identity/write permission, CODEOWNERS, and native Copilot approval settings. Keep approval credit off; a mismatch is a blocker, not permission to change another setting. Preserve concurrent changes and obtain approval for unexpected scope rather than overwriting an old snapshot. Change only the required-reviewer entry, then compare effective read-back with the pre-write snapshot and record the activation SHA/time, rules evidence, responsible admin, and approved production positive/negative cases using non-bypass identities. Never merge a failing production fixture.
+
+Rehearse removal of only the new entry in isolation. Removing it restores the **weaker baseline**, where maintainers/on-call may satisfy existing review rules alone; it does not preserve approvers-only authority. A production rollback needs explicit admin authorization. If authority must remain enforced, separately authorize and verify a technical merge pause before removal; a requested human pause is not a technical block. Preserve other protections/bypasses, leave Copilot credit off, and record residual risks without broadening bypasses.
+
+This stage adds no App, evaluator/check, relay, service, secrets, workflow dispatch, cloud resource, or upstream CODEOWNERS change. It does not establish Stage 2 push-review activation, Stage 3 CodeQL enforcement, Stage 4 advisory activation, or Copilot credit behavior. The inspected rules still have `review_on_push: false` and no native CodeQL rule or required CodeQL completion context; the other operational states have not been verified.
 
 #### Step 4.4: Point human reviewers at the riskiest changes
 
@@ -292,13 +322,15 @@ We should:
 
 #### Step 4.5: Let Copilot approve low-tier changes, after a trial
 
+**Deferred beyond Stage 5.** The following describes later Copilot-credit work, not permission to enable it. The blanket required-team rule remains in place unless a separately approved design proves a safe native exception.
+
 [Copilot approvals](https://docs.github.com/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#copilot-approvals) became generally available on October 28, 2026. A repository admin can turn them on under [Settings > Copilot > Code review](https://docs.github.com/en/copilot/how-tos/copilot-on-github/set-up-copilot/configure-code-review#customizing-copilot-code-review-1), which has three Auto-approval settings:
 
 - **Allow Copilot to approve pull requests** lets Copilot submit an approving review.
 - **Allow Copilot approvals to count toward merge requirements** lets that approval satisfy the ruleset's required approval, the same way a teammate's would.
 - **File paths** optionally limits which pull requests that applies to. The admin enters up to 15 file globs, one per line, such as `docs/**` or `.changeset/**`. Copilot's approval counts toward merge only when every changed file in the pull request matches at least one glob. If the list is blank, it counts for every file. A glob can only add paths, not exclude them, so each one must avoid matching any high-tier path.
 
-For example, with the globs `docs/**` and `**/*.md`, a pull request that changes `docs/setup.md` and `README.md` can merge on Copilot's approval. If it also changes `packages/core/src/index.ts`, it still needs a human approval.
+For example, the globs `docs/**` and `**/*.md` would match `docs/setup.md` and `README.md`, but not `packages/core/src/index.ts`. Matching globs alone would not satisfy the blanket team requirement, CODEOWNERS, author eligibility, or the later rollout gates.
 
 The globs don't change which pull requests Copilot reviews. The `main` ruleset still requests a review on every non-draft pull request, and every review still includes Copilot's approval assessment in its summary comment. A new push dismisses Copilot's approval.
 
@@ -306,20 +338,24 @@ We should roll this plan out in four parts:
 
 - **Trial.** For at least four weeks and at least 30 low-tier pull requests, **leave approvals off and record Copilot's approval assessment for each pull request next to the human decision on the same commit**. Count any false approvals (where Copilot would approve, but a human asks for a real fix). Turn approvals on only if there are no false approvals in the trial period. If there are false approvals, update the review instructions and skills, then run a new trial.
 - **Allow-list.** Use the low tier's paths as the globs. Never include `.github/**`, any `AGENTS.md` or `copilot-instructions.md`, or any glob that overlaps a high-tier path. That rules out broad test globs such as `**/*.test.ts`, which would match the `*.test.ts` files under `packages/adapter-canvas/test/e2e-cloud/`; list the low-tier test folders by name instead.
-- **Code owners.** The synced `CODEOWNERS` assigns every path (`*`) to our teams, and the ruleset requires a code-owner review. GitHub doesn't document whether a Copilot approval satisfies that rule. We should test it on a scratch repository first. If it doesn't, we should propose upstream `CODEOWNERS` entries with no owners for the low-tier paths.
-- **Trusted authors.** Copilot approvals don't check who wrote the change. We should add a required status check that passes when the pull request has a human approval of the current commit, or when its author is a member of the maintainers or approvers teams. An agent's pull request counts as trusted only when the check can confirm from GitHub's own records, not the pull request template, that a team member started the agent. Outside contributions therefore still need a human, and the check fails when it can't tell.
+- **Native requirements.** A later design must qualify Copilot behavior against both CODEOWNERS and the blanket team requirement. No ownerless Low entries or upstream CODEOWNERS rewrite is authorized here.
+- **Trusted authors.** Later eligibility must establish trusted authorship, agent origin from GitHub records, and review validity, and fail closed when unknown. Trusted authorship alone never satisfies Stage 5. Defer the App/evaluator and check architecture; it must address stale SHA-scoped success and per-PR authority isolation rather than assuming a required check solves them.
 
 #### Step 4.6: Guard review instructions against fork pull requests
+
+The advisory instruction warning is part of Stage 4 preparation. Approval-credit guards below are deferred with Step 4.5; they do not replace Stage 5 human authority.
 
 Copilot code review reads instructions and skills from the pull request's head branch, including `AGENTS.md` files anywhere in the tree. A fork can therefore rewrite `code-review.instructions.md` in the same pull request it wants approved. These changes keep such a pull request from earning a Copilot approval:
 
 - Keep `.github/**` and every `AGENTS.md` out of the approval globs (Step 4.5).
-- Propose upstream `CODEOWNERS` entries for `.github/instructions/**`, `.github/skills/**`, `.github/prompts/**`, `.github/copilot-instructions.md`, and `**/AGENTS.md`, so a change to the reviewer's rules needs a maintainer.
+- Keep review-policy and instruction changes under approvers-team human authority. Existing CODEOWNERS already includes approvers; no upstream rewrite is needed for Stage 5.
 - Turn on "Only allow Copilot code review to be triggered by authorized users." Without it, an outside contributor can edit the instructions on their fork and then request a review with their own Copilot license. With it on, only people with a Copilot license from our org can request reviews. [Automatic reviews from the `main` ruleset still run](https://docs.github.com/en/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#reviews-requested-with-an-external-copilot-license), so this doesn't affect Step 2.1, and it doesn't stop a ruleset review from reading a fork's edited instructions. The `CODEOWNERS` entries and the approval-glob exclusions are the main guard.
 
-These guards stop a tampered review from approving a pull request, but not from shaping what Copilot says. A fork that rewrites the instructions can still get a review that calls a risky change safe, and that comment can sway the human who reviews it. We should have the Step 4.2 labeler add a `review-instructions-changed` label and a comment whenever a pull request touches the instruction, skill, prompt, or `AGENTS.md` paths, telling the human reviewer to set Copilot's review aside and read the change themselves.
+The later guards need qualification before Copilot receives approval credit. They cannot stop a tampered review from shaping what Copilot says. A fork that rewrites the instructions can still get a review that calls a risky change safe, and that comment can sway the human who reviews it. The Step 4.2 advisory preparation includes a `review-instructions-changed` label and warning for instruction changes; its operational activation remains separate.
 
 #### Step 4.7: Suspend Copilot approvals when one goes wrong
+
+**Deferred beyond Stage 5.** Approval credit stays off during human-only preparation and activation.
 
 We need a way to stop merging on Copilot approvals if one lets a bad change through, and a clear bar for starting again.
 
@@ -341,7 +377,7 @@ To turn approvals back on, we should:
 
 ### Error handling
 
-We need every new check to fail closed. "Fail closed" means that when a check breaks, it blocks the merge instead of letting the pull request through. When something goes wrong, the pull request should fall back to needing a human.
+Stage 5 adds no custom check. Its native failure and authority-revocation cases must pass before activation. In later Copilot-credit work, every new check must fail closed: a broken check must not grant an exception, and any human fallback must still satisfy approvers-team authority.
 
 - **Copilot doesn't review.** The review can fail to run because the author has no Copilot license, has run out of AI credits, or GitHub has an outage. Then there's no Copilot approval, and the ruleset's required approval must come from a human.
 - **The labeler fails or doesn't run.** Labels only inform reviewers. The approval globs and the Step 4.5 trusted-author check work from the changed files and the author, never from labels, so a missing or wrong label can't lower the bar.
@@ -357,7 +393,7 @@ Each phase gets one verification:
 - **Phase 1.** Open a pull request after Step 1.2 and confirm that Copilot's review applied the `radius-code-review` skill and ended with the summary comment.
 - **Phase 2.** Once the rollout is separately authorized, test it in GitHub. Confirm that Copilot reviews the new commit after a push, skips drafts under the tested settings, handles resolved findings, and uses the requested effort. Test a maintainer's review request, the author's pause after round three, and admin rollback. Record any blocked case or platform limitation. Local reviews cannot establish these results.
 - **Phase 3.** Complete the separately authorized scan, enforcement, and rollback cases in [Phase 3 acceptance evidence](#phase-3-acceptance-evidence). Local workflow tests establish execution contracts, not GitHub merge blocking.
-- **Phase 4.** Run the acceptance cases below on a scratch repository with a copy of the `main` ruleset and the same Copilot settings, before we change anything in ai-extensions.
+- **Phase 4 / Stage 5.** First complete the separately authorized native-human qualification in [Step 4.3](#qualify-before-activation). The Copilot-credit cases below remain deferred until a later design and separately authorized isolated rollout.
 
 ### Phase 3 acceptance evidence
 
@@ -406,20 +442,20 @@ Repository preparation alone leaves the later milestones pending authorization a
 
 ### Phase 4 acceptance cases
 
-In each case, "blocked" means GitHub won't allow the merge.
+These are deferred Copilot-credit cases, not the Stage 5 native-human qualification matrix. Reconcile them with the retained team requirement before any later rollout. In each case, "blocked" means GitHub won't allow the merge.
 
-| #  | Scenario                   | Setup                                                                                                                                                | Expected result                                                                                                                        |
-|----|----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
-| 1  | Mixed tiers                | A trusted author changes `docs/setup.md` and `.github/workflows/build.yml`, and Copilot approves.                                                    | Blocked until a human approves. Copilot's approval doesn't count, because the workflow file matches no glob.                           |
-| 2  | Stale human approval       | A human approves, then the author pushes another commit.                                                                                             | Blocked until a human approves the new commit. The ruleset dismisses stale approvals on push and requires approval of the latest push. |
-| 3  | Dismissed Copilot approval | Copilot approves a low-tier change, then the author pushes again.                                                                                    | Blocked until Copilot approves the new commit or a human does.                                                                         |
-| 4  | A push raises the tier     | A low-tier pull request gets a new commit that touches `packages/core/src/workflows/`.                                                               | Copilot's approval no longer counts, so the new commit needs a human approval.                                                         |
-| 5  | Label tampering            | Someone removes `risk:high` or adds `risk:low` by hand.                                                                                              | No change. The checks ignore labels.                                                                                                   |
-| 6  | Untrusted author           | An outside contributor's docs-only pull request gets a Copilot approval.                                                                             | Blocked until a human approves.                                                                                                        |
-| 7  | Instruction change         | A pull request edits `.github/instructions/code-review.instructions.md` along with a docs file.                                                      | Copilot's approval doesn't count, and the labeler adds `review-instructions-changed` and its comment.                                  |
-| 8  | Team lookup fails          | The trusted-author check runs with a token that can't read team membership.                                                                          | The check fails, so the pull request is blocked.                                                                                       |
-| 9  | Agent of unknown origin    | An agent opens a low-tier pull request, and the check can't confirm which team member started it.                                                    | Treated as untrusted: blocked until a human approves.                                                                                  |
-| 10 | Approvals suspended        | A maintainer turns off "Allow Copilot approvals to count toward merge requirements," then Copilot approves a trusted author's low-tier pull request. | Blocked until a human approves (Step 4.7).                                                                                             |
+| #  | Scenario                   | Setup                                                                                                                                                | Expected result                                                                                                                    |
+|----|----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
+| 1  | Mixed tiers                | A trusted author changes `docs/setup.md` and `.github/workflows/build.yml`, and Copilot approves.                                                    | Blocked until a human approves. Copilot's approval doesn't count, because the workflow file matches no glob.                       |
+| 2  | Stale human approval       | A human approves, then the author pushes a diff-changing commit.                                                                                     | Blocked until a qualifying human reapproves under native stale-diff and latest-push rules; no exact-SHA review reducer is implied. |
+| 3  | Dismissed Copilot approval | Copilot approves a low-tier change, then the author pushes again.                                                                                    | Blocked until Copilot approves the new commit or a human does.                                                                     |
+| 4  | A push raises the tier     | A low-tier pull request gets a new commit that touches `packages/core/src/workflows/`.                                                               | Copilot's approval no longer counts, so the new commit needs a human approval.                                                     |
+| 5  | Label tampering            | Someone removes `risk:high` or adds `risk:low` by hand.                                                                                              | No change. The checks ignore labels.                                                                                               |
+| 6  | Untrusted author           | An outside contributor's docs-only pull request gets a Copilot approval.                                                                             | Blocked until a human approves.                                                                                                    |
+| 7  | Instruction change         | A pull request edits `.github/instructions/code-review.instructions.md` along with a docs file.                                                      | Copilot's approval doesn't count, and the labeler adds `review-instructions-changed` and its comment.                              |
+| 8  | Team lookup fails          | The trusted-author check runs with a token that can't read team membership.                                                                          | The check fails, so the pull request is blocked.                                                                                   |
+| 9  | Agent of unknown origin    | An agent opens a low-tier pull request, and the check can't confirm which team member started it.                                                    | Treated as untrusted: blocked until a human approves.                                                                              |
+| 10 | Approvals suspended        | A maintainer turns off "Allow Copilot approvals to count toward merge requirements," then Copilot approves a trusted author's low-tier pull request. | Blocked until a human approves (Step 4.7).                                                                                         |
 
 We also need to confirm these facts before the step that depends on each:
 
@@ -431,11 +467,11 @@ We also need to confirm these facts before the step that depends on each:
 
 ## Security
 
-This proposal lets some changes merge without a human, so its main risk is a pull request that earns an approval it shouldn't.
+Stage 5 keeps human approval mandatory; the later Copilot-credit proposal could let some changes merge without it. Both need evidence that a PR cannot earn authority it should not have.
 
-- **Tampered review instructions.** Copilot reads instructions and skills from the pull request's head branch, so a fork can rewrite them. Step 4.6 keeps those paths out of the approval globs, requires a maintainer to approve changes to them, and flags them for the human reviewer.
+- **Tampered review instructions.** Copilot reads instructions and skills from the pull request's head branch, so a fork can rewrite them. Stage 5 requires an approvers-team human; Step 4.6's later approval-glob exclusions and the advisory warning do not replace that authority.
 - **The labeler's trigger.** On a fork pull request, the `pull_request` trigger gets a read-only token, so the labeler needs `pull_request_target`. That trigger runs with a write token in our repository, so the labeling job must never check out or run the pull request's code, and should request only `pull-requests: write`.
-- **The token for team lookups.** The default `GITHUB_TOKEN` can't read organization team membership, so the trusted-author check needs a GitHub App token with organization `members: read`. That token belongs in a job that runs no pull request code.
+- **Team authority.** Stage 5 uses native team review, with hard qualification gates for revocation, effective membership, and per-PR isolation. It needs no App token. Later custom eligibility would need a separate credential and lifecycle design that runs no PR-controlled code; a membership lookup alone cannot prevent stale approval credit.
 - **Wider merge rights.** Copilot approvals count only for low-tier paths, only for trusted authors, and only after the trial and the acceptance cases pass. Any maintainer can suspend them at once (Step 4.7). Every other change keeps a human approval.
 - **Copilot Memory.** A wrong fact in memory would steer later reviews without anyone seeing it, so Step 1.5 asks who can audit what it stores.
 
@@ -448,7 +484,7 @@ Automatic reviews usually charge the author; manual reviews usually charge the r
 Step 4.5 asks for four weeks, 30 low-tier pull requests, and zero false approvals. Someone has to record Copilot's assessment next to the human decision for each of those pull requests. Proposed: keep the bar, and name an owner for the record before the trial starts.
 
 **Q: Should an agent's pull request ever count as trusted?**
-Step 4.5 trusts an agent's pull request only when GitHub's records show a team member started the agent. The alternative is to require a human approval on every agent pull request. Proposed: keep the Step 4.5 rule, since the check fails closed when it can't tell.
+Stage 5 requires an approvers-team human for agent PRs as for every other author. Step 4.5's agent-origin exception is deferred; a later design must establish attribution from GitHub records and fail closed when it cannot.
 
 **Q: What happens when a required check is flaky?**
 Step 3.2 preserves `CI gate`, which requires the Canvas Chromium and Windows jobs to succeed. If one fails at random, it blocks merges that are otherwise ready. Diagnose it under the code-quality skill's retry and no-quarantine rules; never quarantine safety-critical coverage or drop the required check to clear a merge.
