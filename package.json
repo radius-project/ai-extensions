@@ -31,6 +31,7 @@
     "test:visual:canonical": "node scripts/canvas-visual.mjs check",
     "test:visual:canonical:update": "node scripts/canvas-visual.mjs update",
     "test:reliability": "pnpm --filter @radius-project/adapter-canvas run test:reliability",
+    "test:github-contract": "pnpm --filter @radius-project/adapter-canvas run test:github-contract",
     "test:watch": "vitest",
     "coverage": "vitest run --coverage",
     "lint": "eslint eslint.config.mjs \"packages/**/*.{ts,mjs}\" \"extensions/radius/skills/**/*.mjs\" \"scripts/**/*.mjs\" vitest.config.ts",
