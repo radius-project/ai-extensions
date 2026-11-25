@@ -7,6 +7,8 @@ function fixture() {
     resolveTarget: vi.fn((_workspace, value, fallback) => value ?? fallback),
     stagingPrefix: vi.fn(() => ".staging-run/"),
     validateRegistryTarget: vi.fn<() => string | null>(() => null),
+    isUnconfirmedExit: vi.fn((_error: unknown) => false),
+    localTargetKey: (target: string) => target.toLowerCase(),
     exists: vi.fn(() => true),
     compileExtension: vi.fn(async () => {}),
     publishRecipe: vi.fn(async () => "registry reference")
@@ -116,5 +118,55 @@ describe("application publication", () => {
       target,
       "workspace"
     );
+  });
+
+  it("reports an unconfirmed exit and refuses both a queued successor and later calls to that tag", async () => {
+    const { ports, publication } = fixture();
+    const unconfirmed = new Error("Windows process tree exit unconfirmed");
+    ports.isUnconfirmedExit.mockImplementation(
+      (error) => error === unconfirmed
+    );
+    ports.publishRecipe.mockRejectedValueOnce(unconfirmed);
+    const target = "br:ghcr.io/org/repo/database:v1";
+    const recipe = (reference: string) =>
+      publication.publishRecipe("workspace", "org/repo", {
+        file: "recipe.bicep",
+        target: reference
+      });
+
+    const older = expect(recipe(target)).rejects.toBe(unconfirmed);
+    const queued = expect(recipe(target)).rejects.toThrow(
+      "previous Windows process tree"
+    );
+    await Promise.all([older, queued]);
+    await expect(recipe(target.toUpperCase())).rejects.toThrow(
+      "previous Windows process tree"
+    );
+    expect(ports.publishRecipe).toHaveBeenCalledOnce();
+    await expect(recipe("br:ghcr.io/org/repo/cache:v1")).resolves.toMatchObject(
+      {
+        kind: "published"
+      }
+    );
+  });
+
+  it("blocks a standalone compiler from reusing an unconfirmed managed output path", async () => {
+    const { ports, publication } = fixture();
+    const target = ".radius/.staging-run/custom-types.tgz";
+    const unconfirmed = new Error("Windows process tree exit unconfirmed");
+    ports.isUnconfirmedExit.mockImplementation(
+      (error) => error === unconfirmed
+    );
+    await expect(
+      publication.compileInOrder(target, async () => {
+        throw unconfirmed;
+      })
+    ).rejects.toBe(unconfirmed);
+    await expect(
+      publication.compileExtension("workspace", {
+        targetPath: target.toUpperCase()
+      })
+    ).rejects.toThrow("previous Windows process tree");
+    expect(ports.compileExtension).not.toHaveBeenCalled();
   });
 });

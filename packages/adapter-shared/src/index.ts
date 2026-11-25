@@ -46,7 +46,11 @@ export type {
   RunRadBicepPublishExtensionOptions,
   RunRadBicepPublishOptions
 } from "./rad.js";
-export { RadProcessError } from "./rad.js";
+export {
+  isRadProcessExitUnconfirmed,
+  RadProcessError,
+  RadProcessExitUnconfirmedError
+} from "./rad.js";
 export {
   readWorkflowRun,
   readWorkflowRunWithMetadata,

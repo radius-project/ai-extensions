@@ -2575,6 +2575,47 @@ describe("managed Bicep publishing", () => {
     expect(fs.existsSync(invocation)).toBe(false);
   });
 
+  it("preserves the unconfirmed-exit warning and cause through both publish wrappers", async () => {
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    const { isRadProcessExitUnconfirmed } = await import("./index.js");
+    writeManagedBicepStub();
+    const unconfirmed = new mod.RadProcessExitUnconfirmedError(
+      "timed out",
+      "",
+      "partial compiler output"
+    );
+    const beforeSpawn = () => {
+      throw unconfirmed;
+    };
+
+    const outcomes = await Promise.allSettled([
+      mod.runRadBicepPublishExtension({
+        fromFile: path.join(root, "manifest.yaml"),
+        target: path.join(root, "extension.tgz"),
+        beforeSpawn
+      }),
+      mod.runRadBicepPublish({
+        file: path.join(root, "recipe.bicep"),
+        target: "br:registry.invalid/acme/recipe:v1",
+        beforeSpawn
+      })
+    ]);
+
+    for (const outcome of outcomes) {
+      expect(outcome).toMatchObject({
+        status: "rejected",
+        reason: {
+          message: expect.stringContaining("do not use the affected target"),
+          cause: unconfirmed
+        }
+      });
+      if (outcome.status === "rejected") {
+        expect(isRadProcessExitUnconfirmed(outcome.reason)).toBe(true);
+      }
+    }
+  });
+
   it("publishes a Bicep module with caller authentication isolated in the child environment", async () => {
     vi.resetModules();
     const mod = await import("./rad.js");

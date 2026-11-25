@@ -39,7 +39,10 @@ import { missingModelHandoffTarget } from "./missing-model-handoff-claims.js";
 import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../graph-progress-contract.js";
 import { appModelTargetKey } from "../app-model-authoring-failure.js";
 import { errorMessage } from "./util.js";
-import type { createCanvasModelAuthoring } from "./canvas-model-authoring.js";
+import {
+  readCanvasAuthoringBootstrap,
+  type createCanvasModelAuthoring
+} from "./canvas-model-authoring.js";
 
 export interface AppModelHandoffRequest {
   repo: string;
@@ -113,7 +116,10 @@ export interface AppModelHandoffDependencies {
   // waits for that run instead of asking again. The agent never calls
   // radius_generate_app for a run the Canvas requests, so nothing else records
   // it before the run creates its staging directory.
-  announceModelingRun(repo: string, branches: ReadonlyArray<string>): void;
+  announceModelingRun(
+    repo: string,
+    branches: ReadonlyArray<string>
+  ): () => void;
   // Injected so the grace window below is driven by a fake clock in tests, and
   // so nothing here owns a timer.
   wait(ms: number): Promise<void>;
@@ -178,6 +184,55 @@ export function createAppModelHandoff(
   deps: AppModelHandoffDependencies
 ): AppModelHandoff {
   const targetKey = missingModelHandoffTarget;
+  const panelReservations = new WeakMap<CanvasState, Map<string, symbol>>();
+  const promotedRevisions = new Map<string, { revision: string }>();
+  const nodeNotices = new Map<string, symbol>();
+  const promotionKey = (workspace: string, repo: string, branch: string) =>
+    JSON.stringify([workspace, repo, branch]);
+
+  function missingNodeNoticeKey(
+    state: CanvasState,
+    repo: string,
+    branch: string,
+    skillHandoff: string
+  ): string | undefined {
+    const { node } = readCanvasAuthoringBootstrap(skillHandoff);
+    // Node availability is shared by the runtime, even though notices name
+    // the graph that needed it.
+    if (node) nodeNotices.clear();
+    return node === null ?
+        JSON.stringify([state.workspacePath, repo, branch])
+      : undefined;
+  }
+
+  async function sendMissingNodeNotice(
+    key: string,
+    message: HandoffMessage
+  ): Promise<void> {
+    if (nodeNotices.has(key)) return;
+    // This reservation only suppresses the notice; it never blocks a probe.
+    const notice = Symbol(key);
+    nodeNotices.set(key, notice);
+    if (nodeNotices.size > 100) {
+      const oldest = nodeNotices.keys().next().value;
+      if (oldest !== undefined) nodeNotices.delete(oldest);
+    }
+    try {
+      await deps.send(message);
+    } catch (error) {
+      if (nodeNotices.get(key) === notice) nodeNotices.delete(key);
+      throw error;
+    }
+  }
+
+  function rememberPromotion(target: string, revision: string): void {
+    promotedRevisions.delete(target);
+    promotedRevisions.set(target, { revision });
+    if (promotedRevisions.size > 100) {
+      const oldest = promotedRevisions.keys().next().value;
+      if (oldest !== undefined) promotedRevisions.delete(oldest);
+    }
+  }
 
   // The skill handoff failure last shown to the user. Every graph poll retries
   // a handoff that failed, so the same failure is shown once, and again only
@@ -282,24 +337,50 @@ export function createAppModelHandoff(
     const key = appModelHandoffKey(repo, targets, statuses);
     if (state?.appBicepHandoffKeys?.[target] === key) return;
 
+    const reservation = Symbol(key);
     const reserveState = (): void => {
       if (!state) return;
+      let reservations = panelReservations.get(state);
+      if (!reservations) {
+        reservations = new Map();
+        panelReservations.set(state, reservations);
+      }
+      reservations.set(target, reservation);
       state.appBicepHandoffKeys ??= {};
       state.appBicepHandoffKeys[target] = key;
       state.appBicepHandoffKey = key;
     };
     const ownsStateReservation = (): boolean =>
       state === undefined ||
-      (state.appBicepHandoffKeys?.[target] === key &&
+      (panelReservations.get(state)?.get(target) === reservation &&
+        state.appBicepHandoffKeys?.[target] === key &&
         state.appBicepHandoffKey === key);
     const releaseStateReservation = (): void => {
-      if (state?.appBicepHandoffKeys?.[target] === key) {
+      if (!state) return;
+      const reservations = panelReservations.get(state);
+      if (reservations?.get(target) !== reservation) return;
+      reservations.delete(target);
+      if (state.appBicepHandoffKeys?.[target] === key) {
         delete state.appBicepHandoffKeys[target];
-      }
-      if (state?.appBicepHandoffKey === key) {
-        delete state.appBicepHandoffKey;
+        if (state.appBicepHandoffKey === key) delete state.appBicepHandoffKey;
       }
     };
+
+    function clearAttempt(token: string): void {
+      const tokens = state?.appModelAttemptTokens;
+      if (!state || !tokens) return;
+      for (const branch of targets) {
+        const key = appModelTargetKey(repo, branch);
+        if (tokens[key] !== token) continue;
+        // A deliberate failure report uses the token to identify its error,
+        // even after the associated managed request has been cancelled.
+        if (state.appModelFailures?.[key]?.attemptToken !== token)
+          delete tokens[key];
+        delete state.appModelAttemptClaims?.[key];
+        delete state.appModelAttemptEnvironments?.[key];
+        delete state.appModelAttemptSourceRevisions?.[key];
+      }
+    }
 
     if (appAuthoringRequired(statuses)) {
       deps.authorizeMissingModel(page, state, statuses);
@@ -415,6 +496,12 @@ export function createAppModelHandoff(
         return;
       }
 
+      const branch = targets[0];
+      const managedSelection =
+        page === "graph" &&
+        targets.length === 1 &&
+        state?.canvasInstanceId &&
+        settled[0]?.source.kind === "workspace";
       // One token per attempt, recorded under every branch the attempt covers.
       // A diff hands off two branches at once and deliberately reuses this
       // single-branch fencing protocol — an attempt token and a recorded
@@ -439,16 +526,50 @@ export function createAppModelHandoff(
           }
         }
       }
-      try {
-        const branch = targets[0];
+      let retired = false;
+      let releaseAnnouncement: (() => void) | undefined;
+      const retire = (promoted = false): void => {
+        if (retired) return;
+        retired = true;
+        const source = settled[0]?.source;
+        const revision = sourceRevisions[0];
         if (
-          page === "graph" &&
-          targets.length === 1 &&
-          branch &&
-          state &&
-          attemptToken &&
-          settled[0]?.source.kind === "workspace"
+          promoted &&
+          source?.kind === "workspace" &&
+          source.workspacePath &&
+          revision
         ) {
+          rememberPromotion(
+            promotionKey(source.workspacePath, repo, source.ref),
+            revision
+          );
+        }
+        if (attemptToken) clearAttempt(attemptToken);
+        releaseReservation();
+        releaseAnnouncement?.();
+      };
+      try {
+        if (state && attemptToken && managedSelection) {
+          const notice = missingNodeNoticeKey(
+            state,
+            repo,
+            branch,
+            skillHandoff
+          );
+          if (notice) {
+            retire();
+            await sendMissingNodeNotice(
+              notice,
+              appBicepHandoffMessage(
+                repo,
+                skillHandoff,
+                page,
+                targets,
+                state.canvasInstanceId
+              )
+            );
+            return;
+          }
           skillHandoff = deps.beginManaged(
             state,
             repo,
@@ -456,7 +577,8 @@ export function createAppModelHandoff(
             attemptToken,
             sourceRevisions[0],
             skillHandoff,
-            stillCurrent
+            stillCurrent,
+            retire
           );
         }
         await deps.send(
@@ -466,7 +588,7 @@ export function createAppModelHandoff(
             page,
             targets,
             state?.canvasInstanceId,
-            attemptToken && state?.canvasInstanceId ?
+            !retired && attemptToken && state?.canvasInstanceId ?
               {
                 attemptToken,
                 instanceId: state.canvasInstanceId,
@@ -476,26 +598,20 @@ export function createAppModelHandoff(
           )
         );
       } catch (sendError) {
-        if (state && attemptToken) {
-          deps.cancelManaged(attemptToken);
-          for (const branch of targets) {
-            const tokenKey = appModelTargetKey(repo, branch);
-            if (state.appModelAttemptTokens?.[tokenKey] === attemptToken) {
-              delete state.appModelAttemptTokens[tokenKey];
-              delete state.appModelAttemptClaims?.[tokenKey];
-              delete state.appModelAttemptEnvironments?.[tokenKey];
-              delete state.appModelAttemptSourceRevisions?.[tokenKey];
-            }
-          }
+        try {
+          if (attemptToken && !retired) deps.cancelManaged(attemptToken);
+        } finally {
+          retire();
         }
-        releaseReservation();
         throw sendError;
       }
       // send() resolves when the handoff is queued, not when the queued turn
       // runs. Keep the extension claim until its bounded expiry, while clearing
       // the panel reservation so this same view can retry after that expiry.
-      deps.missingModelHandoffs.markDelivered(claim);
-      deps.announceModelingRun(repo, targets);
+      if (!retired && deps.missingModelHandoffs.owns(claim)) {
+        deps.missingModelHandoffs.markDelivered(claim);
+        releaseAnnouncement = deps.announceModelingRun(repo, targets);
+      }
       releaseStateReservation();
       return;
     }
@@ -529,15 +645,9 @@ export function createAppModelHandoff(
       let attemptToken: string | undefined;
       const tokenKey = appModelTargetKey(repo, model.branch);
       const releaseRefresh = (): void => {
-        if (!attemptToken) {
-          releaseStateReservation();
-        } else {
-          const tokens = state?.appModelAttemptTokens;
-          if (tokens?.[tokenKey] === attemptToken) {
-            delete tokens[tokenKey];
-            releaseStateReservation();
-          }
-        }
+        if (attemptToken) clearAttempt(attemptToken);
+        attemptToken = undefined;
+        releaseStateReservation();
         releaseMemo?.();
         releaseMemo = undefined;
       };
@@ -560,6 +670,18 @@ export function createAppModelHandoff(
           await deps.send(appModelUnverifiedMessage(model, skillHandoff));
         } else {
           if (state?.canvasInstanceId && model.source.kind === "workspace") {
+            const notice = missingNodeNoticeKey(
+              state,
+              repo,
+              model.branch,
+              skillHandoff
+            );
+            const promotionTarget =
+              model.source.workspacePath ?
+                promotionKey(model.source.workspacePath, repo, model.branch)
+              : undefined;
+            const observedPromotion =
+              promotionTarget && promotedRevisions.get(promotionTarget);
             const revision = await deps.readSourceRevision(
               repo,
               model.branch,
@@ -583,12 +705,39 @@ export function createAppModelHandoff(
               releaseRefresh();
               return;
             }
+            // The origin records HEAD, so an unchanged saved worktree can
+            // still look stale after promotion. Suppress only that revision,
+            // independently of the pre-promotion model's freshness evidence.
+            if (revision && promotionTarget) {
+              const latestPromotion = promotedRevisions.get(promotionTarget);
+              if (
+                model.freshness.status === "source-changed" &&
+                latestPromotion?.revision === revision
+              ) {
+                releaseRefresh();
+                return;
+              }
+              if (
+                latestPromotion &&
+                latestPromotion === observedPromotion &&
+                latestPromotion.revision !== revision
+              )
+                promotedRevisions.delete(promotionTarget);
+            }
             attemptToken = randomUUID();
             state.appModelAttemptTokens ??= {};
             state.appModelAttemptTokens[tokenKey] = attemptToken;
             delete state.appModelAttemptClaims?.[tokenKey];
             delete state.appModelAttemptEnvironments?.[tokenKey];
             delete state.appModelAttemptSourceRevisions?.[tokenKey];
+            if (notice) {
+              releaseRefresh();
+              await sendMissingNodeNotice(
+                notice,
+                appModelRefreshMessage(model, skillHandoff)
+              );
+              return;
+            }
             skillHandoff = deps.beginManaged(
               state,
               repo,
@@ -597,7 +746,11 @@ export function createAppModelHandoff(
               revision,
               skillHandoff,
               stillCurrent,
-              releaseRefresh
+              (promoted) => {
+                if (promoted && promotionTarget)
+                  rememberPromotion(promotionTarget, revision);
+                releaseRefresh();
+              }
             );
           }
           await deps.send(appModelRefreshMessage(model, skillHandoff));

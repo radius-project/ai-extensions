@@ -632,6 +632,12 @@ describe("graph planning workflows", () => {
         await harness.run(workflow, JSON.stringify(request));
         const isCurrent = handoff.mock.calls[0]?.[5];
         if (!isCurrent) throw new Error("Missing handoff currency predicate");
+        expect(structuredClone(harness.state)).toMatchObject({
+          sourceRefSelectionEpochs: { [view]: expect.any(String) },
+          graphProgressRecords: {
+            [view]: { graphProgressSelectionEpoch: expect.any(String) }
+          }
+        });
         expect(isCurrent()).toBe(true);
         await harness.run(
           workflow,
@@ -675,6 +681,13 @@ describe("graph planning workflows", () => {
           baseBranch: "new-base",
           headBranch: "new-head"
         });
+        prepareSourceRefResources(
+          harness.entry,
+          view,
+          view === "diff" ?
+            { repo: "octo/app", baseBranch: "main", headBranch: "feature/x" }
+          : { repo: "octo/app", branch: "main" }
+        );
         expect(isCurrent()).toBe(false);
       }
     );

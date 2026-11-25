@@ -152,6 +152,7 @@ export interface GraphProgressRecord {
   graphProgressActive: boolean;
   graphProgressView: GraphProgressView;
   graphProgressKey: string;
+  graphProgressSelectionEpoch?: string;
   graphProgressRepo?: string;
   graphProgressBranches?: string[];
   graphProgressOwner: number;
@@ -293,6 +294,7 @@ export interface CanvasState {
   deployError?: string | null;
   activeGraphView?: GraphView;
   sourceRefContexts?: Partial<Record<GraphView, SourceRefContext>>;
+  sourceRefSelectionEpochs?: Partial<Record<GraphView, string>>;
   pendingSourceRefs?: PendingSourceRef[];
   page?: string;
   graphDefinitionHash?: string;
