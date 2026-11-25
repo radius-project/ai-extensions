@@ -78,6 +78,7 @@ const STAGING_RUN_RECORD = "run.json";
 // failure paths already delete, so no failure path has to remember to undo it.
 const STAGING_SELF_IGNORE_FILE = ".gitignore";
 const STAGING_SELF_IGNORE = "*\n";
+const PUBLISHED_BACKUP_SUFFIX = ".published-backup";
 const REQUIRED_STAGED_FILES = [
   "app.bicep",
   "bicepconfig.json",
@@ -90,6 +91,21 @@ function fail(message) {
 }
 
 class RefusedPromotion extends Error {}
+
+class PromotionRecoveryRequired extends RefusedPromotion {}
+
+class IncompletePromotionRollback extends PromotionRecoveryRequired {
+  constructor(stagingDir, promotionError, rollbackErrors) {
+    super(
+      `Publishing the application model failed (${promotionError.message}) and rollback was incomplete: ${rollbackErrors.map((error) => error.message).join("; ")}. Recovery files remain at ${stagingDir}. Review and restore the backups before retrying modeling.`,
+      {
+        cause: new AggregateError(rollbackErrors, "Model rollback failed", {
+          cause: promotionError
+        })
+      }
+    );
+  }
+}
 
 function flag(name) {
   const index = process.argv.indexOf(`--${name}`);
@@ -286,15 +302,24 @@ function managedFilesFor(radiusDir) {
 // Returns true when the file was written, so only a rule this run added is
 // staged in git.
 function readStableRegularFile(file) {
-  const expected = lstatSync(file, { bigint: true, throwIfNoEntry: false });
-  if (!expected) return null;
-  if (!expected.isFile()) fail(`${file} is not a stable regular file.`);
-  const fd = openSync(
-    file,
-    constants.O_RDONLY |
-      (constants.O_NOFOLLOW ?? 0) |
-      (constants.O_NONBLOCK ?? 0)
-  );
+  let fd;
+  try {
+    fd = openSync(
+      file,
+      constants.O_RDONLY |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0)
+    );
+  } catch (error) {
+    // On platforms without O_NOFOLLOW, a dangling link can also produce ENOENT.
+    if (
+      error.code === "ENOENT" &&
+      !lstatSync(file, { throwIfNoEntry: false })
+    ) {
+      return null;
+    }
+    throw error;
+  }
   try {
     const opened = fstatSync(fd, { bigint: true });
     const entry = lstatSync(file, {
@@ -304,8 +329,6 @@ function readStableRegularFile(file) {
     if (
       !opened.isFile() ||
       !entry?.isFile() ||
-      expected.dev !== opened.dev ||
-      expected.ino !== opened.ino ||
       entry.dev !== opened.dev ||
       entry.ino !== opened.ino
     ) {
@@ -620,6 +643,7 @@ export function beginManagedRun(workspaceRoot, observed = []) {
           "Radius cannot promote artifacts that have not passed validation."
         );
       validatedCopy = undefined;
+      let retainForRecovery = false;
       try {
         return await publish(radiusDir, copy.dir, {
           ...options,
@@ -649,13 +673,18 @@ export function beginManagedRun(workspaceRoot, observed = []) {
             }
           }
         });
+      } catch (error) {
+        retainForRecovery = error instanceof PromotionRecoveryRequired;
+        throw error;
       } finally {
-        try {
-          removeCopy(copy.dir, copy.identity);
-        } catch (error) {
-          console.error(
-            `The ignored validation copy at ${copy.dir} could not be removed (${error.message}).`
-          );
+        if (!retainForRecovery) {
+          try {
+            removeCopy(copy.dir, copy.identity);
+          } catch (error) {
+            console.error(
+              `The ignored validation copy at ${copy.dir} could not be removed (${error.message}).`
+            );
+          }
         }
       }
     }
@@ -664,9 +693,8 @@ export function beginManagedRun(workspaceRoot, observed = []) {
 
 // --- publish ---------------------------------------------------------------
 
-// Every refusal discards the staged run. It is never kept for inspection: what
-// the user needs in order to act is in the failure message, and keeping it would
-// leave the product with two places an application model might live.
+// Refusals before a write or after a complete rollback discard the staged run.
+// An incomplete rollback retains it because it may hold the only backups.
 function refuseWith(stagingDir) {
   return (message) => {
     // Best-effort: if the staging directory cannot be removed, the run is still
@@ -776,6 +804,18 @@ function resolveStagingDirectory(radiusDir, requested, managedBaseline) {
   return stagingDir;
 }
 
+function assertNoRecoveryBackups(stagingDir) {
+  if (
+    readdirSync(stagingDir).some((name) =>
+      name.endsWith(PUBLISHED_BACKUP_SUFFIX)
+    )
+  ) {
+    throw new PromotionRecoveryRequired(
+      `Recovery files remain at ${stagingDir}. Review and restore the backups before retrying modeling.`
+    );
+  }
+}
+
 async function publish(
   radiusDir,
   requested,
@@ -834,6 +874,7 @@ async function publish(
 }
 
 function commitPromotion(radiusDir, stagingDir, managedBaseline) {
+  assertNoRecoveryBackups(stagingDir);
   const record =
     managedBaseline ? { baseline: managedBaseline } : readRunRecord(stagingDir);
   const refuse = refuseWith(stagingDir);
@@ -929,7 +970,9 @@ function commitPromotion(radiusDir, stagingDir, managedBaseline) {
       const destination = path.join(radiusDir, file);
       const existed = existsSync(destination);
       const backup =
-        existed ? path.join(stagingDir, `${file}.published-backup`) : null;
+        existed ?
+          path.join(stagingDir, `${file}${PUBLISHED_BACKUP_SUFFIX}`)
+        : null;
       if (existed) renameSync(destination, backup);
       const entry = { destination, backup, published: false };
       moves.push(entry);
@@ -938,12 +981,24 @@ function commitPromotion(radiusDir, stagingDir, managedBaseline) {
     }
     wroteIgnore = ensureStagingIgnored(radiusDir, stagingDir);
   } catch (error) {
+    const rollbackErrors = [];
     for (const entry of moves.reverse()) {
       // Remove what this run put there, then restore what it displaced. A
       // destination with no backup simply did not exist before, so removing it
       // is the whole of the undo.
-      if (entry.published) rmSync(entry.destination, { force: true });
-      if (entry.backup) renameSync(entry.backup, entry.destination);
+      try {
+        if (entry.published) rmSync(entry.destination, { force: true });
+        if (entry.backup) renameSync(entry.backup, entry.destination);
+      } catch (rollbackError) {
+        rollbackErrors.push(
+          new Error(`${entry.destination}: ${rollbackError.message}`, {
+            cause: rollbackError
+          })
+        );
+      }
+    }
+    if (rollbackErrors.length > 0) {
+      throw new IncompletePromotionRollback(stagingDir, error, rollbackErrors);
     }
     refuse(
       `Publishing the application model failed partway (${error.message}), so every file was put back as it was.`
@@ -993,6 +1048,9 @@ function abort(radiusDir, requested) {
       "Only the runtime that started this managed modeling run can cancel it."
     );
   }
+  if (lstatSync(stagingDir, { throwIfNoEntry: false })?.isDirectory()) {
+    assertNoRecoveryBackups(stagingDir);
+  }
   rmSync(stagingDir, { recursive: true, force: true });
   console.log(
     "Discarded the staged modeling run. Nothing was written: .radius/ is exactly as it was before this run, and nothing was staged in git."
@@ -1025,7 +1083,7 @@ export async function runPromotionCli() {
   } catch (error) {
     if (!(error instanceof RefusedPromotion)) throw error;
     console.error(error.message);
-    process.exitCode = 1;
+    process.exitCode = error instanceof PromotionRecoveryRequired ? 3 : 1;
   }
 }
 

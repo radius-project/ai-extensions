@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { serializeAppOrigin } from "@radius-project/core";
 // The staging rules are core's specification for the bundled script, not part
 // of the package's public surface, so they are imported from the modeling
@@ -170,7 +171,106 @@ function promote(managed: ManagedModelStaging) {
   return managed.promote(preparePromotion, allowPromotion);
 }
 
+it("reports incomplete standalone rollback and refuses to discard or reuse its backups", () => {
+  const target = repo("original model");
+  const stagingDir = begin(target);
+  stageCompleteRun(stagingDir);
+  const injectRenameFailures = `
+    import fs from "node:fs";
+    import path from "node:path";
+    import { syncBuiltinESMExports } from "node:module";
+    const config = path.resolve(".radius", "bicepconfig.json");
+    const stage = process.argv[process.argv.indexOf("--staging") + 1];
+    const rename = fs.renameSync;
+    fs.renameSync = (from, to) => {
+      if (to === config && path.dirname(from) === stage) {
+        throw new Error("config rename failed: " + path.basename(from));
+      }
+      rename(from, to);
+    };
+    syncBuiltinESMExports();
+  `;
+  const result = run(
+    target.root,
+    ["--staging", stagingDir],
+    [
+      "--import",
+      `data:text/javascript,${encodeURIComponent(injectRenameFailures)}`
+    ]
+  );
+  expect(result.status, result.stderr).toBe(3);
+  expect(result.stderr).toContain("rollback was incomplete");
+  expect(result.stderr).toContain(`Recovery files remain at ${stagingDir}`);
+  const backup = path.join(stagingDir, "bicepconfig.json.published-backup");
+  expect(fs.readFileSync(backup, "utf8")).toBe(CONFIG);
+
+  for (const flags of [["--abort"], []]) {
+    const retry = run(target.root, [...flags, "--staging", stagingDir]);
+    expect(retry.status, retry.stderr).toBe(3);
+    expect(retry.stderr).toContain(`Recovery files remain at ${stagingDir}`);
+    expect(fs.readFileSync(backup, "utf8")).toBe(CONFIG);
+  }
+  expect(
+    fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
+  ).toBe("original model");
+  expect(stagedInGit(target.root)).toEqual([]);
+});
+
 describe("managed staging", () => {
+  it.each([false, true])(
+    "keeps the validation copy only when promotion rollback is incomplete (restore fails: %s)",
+    async (failRestore) => {
+      const target = repo("original model");
+      const managed = beginManagedRun(target.root);
+      stageCompleteRun(managed.stagingDir);
+      let copy = "";
+      await managed.validate(async (app) => {
+        copy = path.dirname(app);
+      });
+
+      const config = path.join(target.radiusDir, "bicepconfig.json");
+      const backup = path.join(copy, "bicepconfig.json.published-backup");
+      const rename = fs.renameSync;
+      const renameSpy = vi
+        .spyOn(fs, "renameSync")
+        .mockImplementation((from, to) => {
+          if (to === config && from === path.join(copy, "bicepconfig.json")) {
+            throw new Error("could not promote config");
+          }
+          if (failRestore && from === backup && to === config) {
+            throw new Error("could not restore config");
+          }
+          rename(from, to);
+        });
+      syncBuiltinESMExports();
+      try {
+        await expect(promote(managed)).rejects.toThrow(
+          failRestore ?
+            `Recovery files remain at ${copy}`
+          : "every file was put back"
+        );
+      } finally {
+        renameSpy.mockRestore();
+        syncBuiltinESMExports();
+      }
+
+      managed.cancel();
+      expect(
+        fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
+      ).toBe("original model");
+      expect(stagedInGit(target.root)).toEqual([]);
+      if (failRestore) {
+        expect(fs.readFileSync(backup, "utf8")).toBe(CONFIG);
+        expect(fs.existsSync(config)).toBe(false);
+        expect(gitStatus(target.root)).toEqual(["D .radius/bicepconfig.json"]);
+      } else {
+        expect(fs.existsSync(copy)).toBe(false);
+        expect(fs.readFileSync(config, "utf8")).toBe(CONFIG);
+        expect(gitStatus(target.root)).toEqual([]);
+      }
+    }
+  );
+
   it("refuses a non-regular baseline or staged recipe without publishing", async () => {
     const target = repo();
     const config = path.join(target.radiusDir, "bicepconfig.json");
@@ -180,9 +280,36 @@ describe("managed staging", () => {
     stageCompleteRun(managed.stagingDir);
     fs.mkdirSync(path.join(managed.stagingDir, "fixture-recipe.bicep"));
     await expect(managed.validate(async () => {})).rejects.toThrow(
-      "stable regular file"
+      "fixture-recipe.bicep"
     );
     expect(fs.existsSync(path.join(target.radiusDir, "app.bicep"))).toBe(false);
+  });
+
+  it("does not treat a failed open as absence when the baseline entry exists", () => {
+    const target = repo("original model");
+    const config = path.join(target.radiusDir, "bicepconfig.json");
+    const open = fs.openSync;
+    const openSpy = vi
+      .spyOn(fs, "openSync")
+      .mockImplementation((file, ...args) => {
+        if (file === config) {
+          throw Object.assign(new Error("Cannot open existing config"), {
+            code: "ENOENT"
+          });
+        }
+        return open(file, ...args);
+      });
+    syncBuiltinESMExports();
+    try {
+      const managed = beginManagedRun(target.root);
+      expect(() => managed.assertBaseline()).toThrow(
+        "Cannot verify the managed model baseline: bicepconfig.json"
+      );
+    } finally {
+      openSpy.mockRestore();
+      syncBuiltinESMExports();
+    }
+    expect(fs.readFileSync(config, "utf8")).toBe(CONFIG);
   });
 
   it("validates an ignored managed copy and publishes only its validated outputs", async () => {

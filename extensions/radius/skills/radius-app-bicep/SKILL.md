@@ -130,7 +130,7 @@ When a deploy fails because of a modeling or schema error in an existing `.radiu
 
 If the Canvas handoff contains `managedAuthoring`, use its exact `stagingDir` and `requestToken`. Do not run the standalone begin, promote, or abort commands or call `radius_generate_app` for this handoff. Pass the token to both publication tools and keep the existing approval requirements. After checking the staged model and writing its origin, call `radius_complete_app_authoring` with `requestToken` and `outcome: "complete"`. Only `kind: "promoted"` means files were published locally. If `gitError` is nonempty, report that files are on disk but not staged. If the tool is unavailable or refuses the request, stop and report the reason; do not fall back to a standalone promotion. For an intentional skip or abandonment, including when a model already exists or when the user declines, call `radius_complete_app_authoring` with `requestToken` and `outcome: "cancel"`. Report qualifying permanent failures before any cancellation, as described below. A recipe publication that already started may still finish; do not claim that it was rolled back.
 
-A modeling run that stops partway must leave the repository exactly as it was. So a run never writes into `.radius/` directly: it writes everything into a staging directory inside `.radius/`, and a script moves that output into place only once the run is complete and its application model has compiled.
+A run writes its output to a staging directory inside `.radius/` and leaves the existing model untouched until promotion. Promotion moves the compiled model into place and rolls back any partial write it can restore.
 
 **Start every run** — generation or repair — with:
 
@@ -146,9 +146,11 @@ It creates a fresh staging directory, records the fingerprints of the files in `
 "<loaded-node>" "<loaded-skill-base>/scripts/promote-app-model.mjs" --staging "<staging-dir>"
 ```
 
-It refuses unless the staging directory holds a complete set of files, the origin record describes the staged `app.bicep`, and `.radius/app.bicep` is still the file the run started from. On success it moves the files into `.radius/`, deletes the staging directory, adds `.staging-*/` to `.radius/.gitignore`, and stages the published files with `git add` — which is why you never run `git add` yourself. On any refusal it discards the staged run and writes nothing.
+It refuses unless the staging directory holds a complete set of files, the origin record describes the staged `app.bicep`, and `.radius/app.bicep` is still the file the run started from. On success it moves the files into `.radius/`, deletes the staging directory, adds `.staging-*/` to `.radius/.gitignore`, and stages the published files with `git add` — which is why you never run `git add` yourself.
 
 It exits `0` when the run was published and staged, `1` when it refused and nothing was written, and `2` when the files were published but `git add` failed. On `2` the model IS on disk: report that it was written but not staged, and do not re-run the run.
+
+Exit `3` means rollback was incomplete or recovery backups already exist, and `.radius/` may be partially modified. Report the recovery directory printed by the script. Do not abort, delete, or retry the run; leave the backups for the user to restore.
 
 Rules:
 
@@ -158,6 +160,8 @@ Rules:
 - If the script refuses because a file in `.radius/` changed during the run, the user edited it while you were working. Report that their version is intact, that nothing was published, and offer to re-run modeling. Do not attempt to merge, restore, or overwrite their file.
 
 ### When a step fails
+
+If promotion reports incomplete rollback in either mode, preserve the recovery directory and report its path. Do not run `--abort` or start another modeling run until the user has recovered the files.
 
 For a standalone run only, discard the run with:
 
