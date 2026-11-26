@@ -75,6 +75,18 @@ describe("createEnvironmentListingCache", () => {
     expect(cache.generation("octo/in-flight")).toBe(inFlightGeneration + 1);
   });
 
+  it("invalidates a listing in flight for a repository it has never seen", () => {
+    const cache = createEnvironmentListingCache();
+    // A repository's first listing can still be in flight when every listing
+    // is cleared. Nothing names that repository yet, but the listing must still
+    // learn that it may not cache what it read.
+    const startedAt = cache.generation("octo/first");
+
+    cache.clear();
+
+    expect(cache.generation("octo/first")).not.toBe(startedAt);
+  });
+
   it("lets a later listing replace an entry without touching the generation", () => {
     const cache = createEnvironmentListingCache();
     cache.set("octo/app", { at: 1, payload: { environments: [] } });

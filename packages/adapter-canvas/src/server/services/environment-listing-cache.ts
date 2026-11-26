@@ -12,6 +12,9 @@
 // repository's generation, and a listing that reads the generation when it
 // starts can tell, before it caches anything, whether it is describing state
 // that has since changed.
+//
+// The deployments listing has the same race with a deploy or delete dispatch,
+// so it uses this cache too.
 
 export interface CachedEnvironmentListing {
   at: number;
@@ -34,7 +37,12 @@ export interface EnvironmentListingCache {
 export function createEnvironmentListingCache(): EnvironmentListingCache {
   const entries = new Map<string, CachedEnvironmentListing>();
   const generations = new Map<string, number>();
-  const generation = (repo: string): number => generations.get(repo) ?? 0;
+  // A clear has to reach a listing for a repository the cache has never seen,
+  // so it advances every repository's generation at once rather than only the
+  // ones it can name.
+  let clears = 0;
+  const invalidations = (repo: string): number => generations.get(repo) ?? 0;
+  const generation = (repo: string): number => clears + invalidations(repo);
   return {
     get: (repo) => entries.get(repo),
     set: (repo, entry) => {
@@ -42,14 +50,11 @@ export function createEnvironmentListingCache(): EnvironmentListingCache {
     },
     invalidate: (repo) => {
       entries.delete(repo);
-      generations.set(repo, generation(repo) + 1);
+      generations.set(repo, invalidations(repo) + 1);
     },
     clear: () => {
-      const repos = new Set([...entries.keys(), ...generations.keys()]);
       entries.clear();
-      for (const repo of repos) {
-        generations.set(repo, generation(repo) + 1);
-      }
+      clears += 1;
     },
     generation
   };

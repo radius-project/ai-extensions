@@ -2,6 +2,8 @@ import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { captureDeployedApplicationState } from "../services/deployed-view-state.js";
+import { createEnvironmentListingCache } from "../services/environment-listing-cache.js";
+import type { EnvironmentListingCache } from "../services/environment-listing-cache.js";
 import { createRequestContext } from "../request-context.js";
 import {
   createDeploymentsRoutes,
@@ -118,8 +120,11 @@ function dependencies(
       set: () => {
         throw new Error("deployListCache.set not stubbed");
       },
-      delete: () => {
-        throw new Error("deployListCache.delete not stubbed");
+      invalidate: () => {
+        throw new Error("deployListCache.invalidate not stubbed");
+      },
+      generation: () => {
+        throw new Error("deployListCache.generation not stubbed");
       }
     },
     deployListTtlMs: 15000,
@@ -203,7 +208,8 @@ function deleteDependencies(
     deployListCache: {
       get: () => undefined,
       set: () => undefined,
-      delete: () => undefined
+      invalidate: () => undefined,
+      generation: () => 0
     },
     setTimer: () => ({}),
     ...overrides
@@ -282,7 +288,7 @@ describe("deployments routes (SU-06)", () => {
       await handleListDeployments(
         ctx,
         dependencies({
-          deployListCache: new Map(),
+          deployListCache: createEnvironmentListingCache(),
           deployListTtlMs: 15000,
           ghOrThrow: async () => "dev\nprod",
           resolveEnvDeployment,
@@ -345,7 +351,8 @@ describe("deployments routes (SU-06)", () => {
         deployListCache: {
           get: () => undefined,
           set: () => undefined,
-          delete: () => undefined
+          invalidate: () => undefined,
+          generation: () => 0
         },
         ghOrThrow: () => Promise.resolve(""),
         resetDeploymentViewState: () => {},
@@ -1225,7 +1232,8 @@ describe("deployments routes (SU-06)", () => {
             set: () => {
               throw new Error("a cache hit must not rewrite the cache");
             },
-            delete: () => undefined
+            invalidate: () => undefined,
+            generation: () => 0
           }
         })
       );
@@ -1252,7 +1260,8 @@ describe("deployments routes (SU-06)", () => {
               payload: { deployments: [row("stale")] }
             }),
             set: (_repo, entry) => written.push(entry),
-            delete: () => undefined
+            invalidate: () => undefined,
+            generation: () => 0
           },
           readInstanceEntry: () => undefined,
           ghOrThrow: () => Promise.resolve("dev"),
@@ -1275,15 +1284,15 @@ describe("deployments routes (SU-06)", () => {
       expect(written[0].payload).toEqual({ deployments: [row("dev")] });
     });
 
-    // The cache is injected as the live Map rather than owned by this module,
-    // because server.ts still invalidates it (`deployListCache.delete(repo)`) on
-    // deploy and delete dispatch. A stubbed get/set pair cannot model that, so
-    // this case drives a real Map through the full round trip and then deletes
+    // The cache is injected rather than owned by this module, because server.ts
+    // still invalidates it (`deployListCache.invalidate(repo)`) on deploy and
+    // delete dispatch. A stubbed get/set pair cannot model that, so this case
+    // drives the real cache through the full round trip and then invalidates
     // from the outside exactly the way server.ts does. If a later refactor moved
     // the cache inward, that external invalidation would silently stop working
     // and this is the test that would catch it.
-    it("round-trips a real Map and misses again after an external delete", async () => {
-      const cache = new Map<string, DeployListCacheEntry>();
+    it("round-trips the real cache and misses again after an external invalidation", async () => {
+      const cache = createEnvironmentListingCache();
       let ghCalls = 0;
       const shared: Partial<DeploymentsDependencies> = {
         deployListCache: cache,
@@ -1306,7 +1315,7 @@ describe("deployments routes (SU-06)", () => {
       const first = context("GET", "/api/list-deployments?repo=octo/todolist");
       await handleListDeployments(first.context, dependencies(shared));
       expect(ghCalls).toBe(1);
-      expect(cache.has("octo/todolist")).toBe(true);
+      expect(cache.get("octo/todolist")).toBeDefined();
       expect(JSON.parse(first.recording.body).deployments).toEqual([
         row("dev")
       ]);
@@ -1318,7 +1327,7 @@ describe("deployments routes (SU-06)", () => {
         row("dev")
       ]);
 
-      cache.delete("octo/todolist");
+      cache.invalidate("octo/todolist");
 
       const third = context("GET", "/api/list-deployments?repo=octo/todolist");
       await handleListDeployments(third.context, dependencies(shared));
@@ -1327,6 +1336,60 @@ describe("deployments routes (SU-06)", () => {
         row("dev")
       ]);
     });
+
+    // A delete dispatched while a listing is still being assembled, or a reset
+    // of every listing, has to win: otherwise the listing that started first
+    // writes the pre-dispatch deployments back into the cache the dispatch just
+    // emptied, and every non-fresh read serves them for a whole TTL.
+    it.each([
+      [
+        "an invalidation",
+        (cache: EnvironmentListingCache) => cache.invalidate("octo/todolist")
+      ],
+      ["a reset", (cache: EnvironmentListingCache) => cache.clear()]
+    ])(
+      "answers but does not cache a listing that %s overtook",
+      async (_overtaker, overtake) => {
+        const cache = createEnvironmentListingCache();
+        let releaseNames: (names: string) => void = () => undefined;
+        let ghCalls = 0;
+        const shared: Partial<DeploymentsDependencies> = {
+          deployListCache: cache,
+          readInstanceEntry: () => undefined,
+          ghOrThrow: () => {
+            ghCalls += 1;
+            if (ghCalls > 1) return Promise.resolve("dev");
+            return new Promise<string>((resolve) => {
+              releaseNames = resolve;
+            });
+          },
+          resolveEnvDeployment: (_repo, environment) =>
+            Promise.resolve(row(environment))
+        };
+
+        const overtaken = context(
+          "GET",
+          "/api/list-deployments?repo=octo/todolist&fresh=1"
+        );
+        const listing = handleListDeployments(
+          overtaken.context,
+          dependencies(shared)
+        );
+        overtake(cache);
+        releaseNames("dev");
+        await listing;
+
+        expect(JSON.parse(overtaken.recording.body).deployments).toEqual([
+          row("dev")
+        ]);
+        expect(cache.get("octo/todolist")).toBeUndefined();
+
+        const next = context("GET", "/api/list-deployments?repo=octo/todolist");
+        await handleListDeployments(next.context, dependencies(shared));
+        expect(ghCalls).toBe(2);
+        expect(cache.get("octo/todolist")).toBeDefined();
+      }
+    );
 
     it("bypasses the cache read entirely for ?fresh=1", async () => {
       const { recording, context: ctx } = context(
@@ -1341,7 +1404,8 @@ describe("deployments routes (SU-06)", () => {
               throw new Error("?fresh=1 must not read the cache");
             },
             set: () => undefined,
-            delete: () => undefined
+            invalidate: () => undefined,
+            generation: () => 0
           },
           readInstanceEntry: () => undefined,
           ghOrThrow: () => Promise.resolve("dev"),
@@ -1373,7 +1437,8 @@ describe("deployments routes (SU-06)", () => {
               payload: { deployments: [row("cached")] }
             }),
             set: () => undefined,
-            delete: () => undefined
+            invalidate: () => undefined,
+            generation: () => 0
           }
         })
       );
@@ -1393,7 +1458,8 @@ describe("deployments routes (SU-06)", () => {
           deployListCache: {
             get: () => undefined,
             set: () => undefined,
-            delete: () => undefined
+            invalidate: () => undefined,
+            generation: () => 0
           },
           readInstanceEntry: () => ({ state: { plannedBranch: "feature/x" } }),
           ghOrThrow: (args) => {
@@ -1447,7 +1513,8 @@ describe("deployments routes (SU-06)", () => {
           deployListCache: {
             get: () => undefined,
             set: () => undefined,
-            delete: () => undefined
+            invalidate: () => undefined,
+            generation: () => 0
           },
           readInstanceEntry: () => undefined,
           ghOrThrow: () => Promise.resolve(""),
@@ -1479,7 +1546,8 @@ describe("deployments routes (SU-06)", () => {
             set: () => {
               throw new Error("a failed listing must not be cached");
             },
-            delete: () => undefined
+            invalidate: () => undefined,
+            generation: () => 0
           },
           ghOrThrow: () => Promise.reject(new Error("HTTP 502")),
           readInstanceEntry: () => undefined
@@ -1505,7 +1573,8 @@ describe("deployments routes (SU-06)", () => {
           deployListCache: {
             get: () => undefined,
             set: () => undefined,
-            delete: () => undefined
+            invalidate: () => undefined,
+            generation: () => 0
           },
           ghOrThrow: () => Promise.reject("gh vanished"),
           readInstanceEntry: () => undefined
@@ -2240,9 +2309,9 @@ describe("deployments routes (SU-06)", () => {
       }
     );
 
-    it("dispatches, evicts the cached listing and reports the run URL", async () => {
+    it("dispatches, invalidates the cached listing and reports the run URL", async () => {
       const { recording, context: ctx } = deleteContext();
-      const cache = new Map<string, DeployListCacheEntry>();
+      const cache = createEnvironmentListingCache();
       cache.set("octo/todolist", { at: Date.now(), payload: {} });
       const dispatched: string[][] = [];
       await handleDeleteDeployment(
@@ -2281,8 +2350,10 @@ describe("deployments routes (SU-06)", () => {
           "octo/todolist"
         ]
       ]);
-      // The eviction the injection exists for: the reader must miss next time.
-      expect(cache.has("octo/todolist")).toBe(false);
+      // The eviction the injection exists for: the reader must miss next time,
+      // and a listing already in flight must not write the pre-delete rows back.
+      expect(cache.get("octo/todolist")).toBeUndefined();
+      expect(cache.generation("octo/todolist")).toBe(1);
     });
 
     it("reports an empty run URL when the run cannot be resolved", async () => {
