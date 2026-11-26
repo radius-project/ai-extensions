@@ -17,6 +17,8 @@ import {
   type DeployRequestDependencies
 } from "../../../src/server/services/deploy-request.js";
 import { createDeploymentViews } from "../../../src/server/services/deployment-views.js";
+import { createEnvironmentListingCache } from "../../../src/server/services/environment-listing-cache.js";
+import type { EnvironmentListingCache } from "../../../src/server/services/environment-listing-cache.js";
 import { createTestDeploymentRuntime } from "../../support/server/deployment-runtime.js";
 import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
@@ -46,7 +48,6 @@ import { DEPLOY_REPAIR_ATTEMPT_CAP } from "@radius-project/core";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type {
-  DeployListCacheEntry,
   DeploymentRow,
   DeploymentsDependencies
 } from "../../../src/server/routes/deployments.js";
@@ -115,7 +116,7 @@ interface Harness {
   runtime: DeploymentRuntime;
   views: ReturnType<typeof createDeploymentViews>;
   state: CanvasState;
-  cache: Map<string, DeployListCacheEntry>;
+  cache: EnvironmentListingCache;
   environments: string[];
   resets: unknown[];
   dispatches: string[][];
@@ -176,7 +177,7 @@ function start(
   const runtime = createTestDeploymentRuntime();
   fixtureRuntimes.push(runtime);
   const views = createDeploymentViews(runtime);
-  const cache = new Map<string, DeployListCacheEntry>();
+  const cache = createEnvironmentListingCache();
   const environments: string[] = [];
   const resets: unknown[] = [];
   const dispatches: string[][] = [];
@@ -249,7 +250,7 @@ function start(
     resolveEnvDeployment,
     ghOrThrow,
     invalidateDeployListCache: (repo) => {
-      cache.delete(repo);
+      cache.invalidate(repo);
     }
   });
 
@@ -1740,7 +1741,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(first.status).toBe(200);
     expect(first.headers.get("cache-control")).toBe("no-store");
     expect(await first.json()).toEqual({ deployments: [row("dev")] });
-    expect(harness.cache.has("octo/todolist")).toBe(true);
+    expect(harness.cache.get("octo/todolist")).toBeDefined();
 
     // Poison the cache entry: a second plain request must serve it verbatim,
     // proving the cache is read rather than recomputed.
@@ -1862,9 +1863,9 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     const entry = await container!.getOrCreate("panel-a");
 
     // Populate the cache through the reader, so the eviction is observed on the
-    // same map the listing route reads from.
+    // same cache the listing route reads from.
     await fetch(`${entry.baseUrl}/api/list-deployments?repo=octo/todo`);
-    expect(harness.cache.has("octo/todo")).toBe(true);
+    expect(harness.cache.get("octo/todo")).toBeDefined();
 
     const response = await post(
       entry.baseUrl,
@@ -1900,7 +1901,62 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     ]);
     // The within-slice invalidation: the reader and the invalidator now live in
     // the same module, so this is proven rather than assumed.
-    expect(harness.cache.has("octo/todo")).toBe(false);
+    expect(harness.cache.get("octo/todo")).toBeUndefined();
+  });
+
+  it("keeps a listing that was in flight during a delete from caching the pre-delete rows over a real socket", async () => {
+    const harness = start();
+    harness.environments.push("dev");
+    const entry = await container!.getOrCreate("panel-a");
+
+    let enterListing!: () => void;
+    const listingEntered = new Promise<void>((resolve) => {
+      enterListing = resolve;
+    });
+    let releaseListing!: () => void;
+    const listingReleased = new Promise<void>((resolve) => {
+      releaseListing = resolve;
+    });
+    let status = "deployed";
+    let resolutions = 0;
+    harness.setDeploymentResolver(async (_repo, environment) => {
+      resolutions += 1;
+      const read = status;
+      if (resolutions === 1) {
+        enterListing();
+        await listingReleased;
+      }
+      return row(environment, read);
+    });
+
+    const inFlight = fetch(
+      `${entry.baseUrl}/api/list-deployments?repo=octo/todo&fresh=1`
+    );
+    await listingEntered;
+    const deleted = await post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app"
+      })
+    );
+    expect(deleted.status).toBe(200);
+    status = "deleting";
+    releaseListing();
+
+    const overtaken = await inFlight;
+    expect(overtaken.status).toBe(200);
+    expect(await overtaken.json()).toEqual({ deployments: [row("dev")] });
+    expect(harness.cache.get("octo/todo")).toBeUndefined();
+
+    const next = await fetch(
+      `${entry.baseUrl}/api/list-deployments?repo=octo/todo`
+    );
+    expect(await next.json()).toEqual({
+      deployments: [row("dev", "deleting")]
+    });
   });
 
   it("discards the deleted application's graph state over a real socket", async () => {
@@ -2239,7 +2295,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       "-f",
       "log_url=https://example.test/dev"
     ]);
-    expect(harness.cache.has("octo/todo")).toBe(false);
+    expect(harness.cache.get("octo/todo")).toBeUndefined();
   });
 
   it("attests an unknown terminal run over HTTP only with a fresh revision and exact typed token", async () => {
@@ -2522,7 +2578,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         confirmation: "octo/todo/run-42@1/dev"
       });
       if (!current.recovery) throw new Error("Missing recovery evidence");
-      expect(harness.cache.has("octo/todo")).toBe(true);
+      expect(harness.cache.get("octo/todo")).toBeDefined();
       const response = await post(
         entry.baseUrl,
         "/api/abandon-deployment",
@@ -2543,7 +2599,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
           }
         : { outcome: "abandoned" }
       );
-      expect(harness.cache.has("octo/todo")).toBe(false);
+      expect(harness.cache.get("octo/todo")).toBeUndefined();
       const marker = `Radius cleanup v1 run:42 attempt:1 rev:${current.recovery.revision}`;
       expect(writes).toHaveLength(2);
       for (const [index, args] of writes.entries())
@@ -2918,7 +2974,7 @@ function startDeploy(
       logError: (message) => {
         throw new Error(message);
       },
-      deployListCache: new Map<string, DeployListCacheEntry>(),
+      deployListCache: createEnvironmentListingCache(),
       deployListTtlMs: 15000,
       activeDeploymentMutation: () => undefined,
       reserveDeploymentMutation: views.reserve,

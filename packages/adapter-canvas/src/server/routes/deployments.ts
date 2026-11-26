@@ -48,15 +48,20 @@ export interface DeployListCacheEntry {
 }
 
 // The deploy listing cache is injected, not owned here, because the deploy
-// dispatch service deletes from the same map through its own
+// dispatch service invalidates the same cache through its own
 // `invalidateDeployListCache` seam. This family now contains both a reader
 // (`list-deployments`) and one of the invalidators (`delete-deployment`), so the
-// eviction is a within-slice behavior and is tested directly against a real Map
-// rather than assumed.
+// eviction is a within-slice behavior and is tested directly against the real
+// cache rather than assumed.
 export interface DeployListCache {
   get(repo: string): DeployListCacheEntry | undefined;
-  set(repo: string, entry: DeployListCacheEntry): unknown;
-  delete(repo: string): unknown;
+  set(repo: string, entry: DeployListCacheEntry): void;
+  /**
+   * Drop a repository's cached listing and mark every listing already in flight
+   * for it as stale.
+   */
+  invalidate(repo: string): void;
+  generation(repo: string): number;
 }
 
 // `code` is `string | number` because that is what the legacy runner produced:
@@ -443,7 +448,7 @@ export async function handleListDeployments(
   // active status pollers (a running deploy/delete) always see live status
   // rather than a value cached before the transition. Only the literal "1"
   // bypasses; the recomputed response is still written back to the cache after
-  // the request completes.
+  // the request completes, unless an invalidation or reset landed while it ran.
   const freshDeploys = context.url.searchParams.get("fresh") === "1";
   // The `null` is only a "no cached entry" marker for the guard below, so
   // `undefined` would be an equivalent substitute.
@@ -462,6 +467,11 @@ export async function handleListDeployments(
     return;
   }
 
+  // A deploy or delete dispatched while this listing is assembled invalidates
+  // the repository's listing. Caching what this request read would then serve
+  // the pre-dispatch deployments for a whole TTL, so it is cached only if no
+  // invalidation or reset landed since it started.
+  const generation = dependencies.deployListCache.generation(repo);
   try {
     // Resolve the current deployment per environment from each environment's
     // OWN history (see resolveEnvDeployment). Querying per environment — rather
@@ -511,7 +521,8 @@ export async function handleListDeployments(
       deployments,
       ...(environmentDiagnostics.length ? { environmentDiagnostics } : {})
     };
-    dependencies.deployListCache.set(repo, { at: Date.now(), payload });
+    if (dependencies.deployListCache.generation(repo) === generation)
+      dependencies.deployListCache.set(repo, { at: Date.now(), payload });
     respond(payload);
   } catch (e) {
     respond({ deployments: [], error: errorMessage(e) });
@@ -933,7 +944,7 @@ export async function handleDeleteDeployment(
     reservationTimer.unref?.();
     // A delete is now in flight, so the cached listing is stale — drop it so the
     // next poll reflects the "Deleting…" state immediately.
-    dependencies.deployListCache.delete(repo);
+    dependencies.deployListCache.invalidate(repo);
     invalidateDeletedDeployment();
     let runUrl = "";
     try {

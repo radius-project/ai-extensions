@@ -13,6 +13,7 @@ import {
 } from "./route-table.js";
 import { createLivenessSourceRoutes } from "./routes/liveness-source.js";
 import { createDeploymentsRoutes } from "./routes/deployments.js";
+import { createEnvironmentListingCache } from "./services/environment-listing-cache.js";
 import { createOperationsStatusRoutes } from "./routes/operations-status.js";
 import { createOperationsControlRoutes } from "./routes/operations-control.js";
 import { createRepositoriesRoutes } from "./routes/repositories.js";
@@ -145,7 +146,7 @@ const productionHandlers = {
     resetDeploymentViewState: () => {},
     captureDeletedDeployment: () => () => {},
     logError: () => {},
-    deployListCache: new Map(),
+    deployListCache: createEnvironmentListingCache(),
     deployListTtlMs: 0,
     activeDeploymentMutation: () => undefined,
     reserveDeploymentMutation: () => null,

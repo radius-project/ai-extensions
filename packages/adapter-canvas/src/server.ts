@@ -566,11 +566,6 @@ interface ManagedEnvironment {
   provider?: string;
 }
 
-interface CachedPayload {
-  at: number;
-  payload: unknown;
-}
-
 interface AppBicepHandoffInput {
   repo: string;
   branches: string[];
@@ -888,15 +883,18 @@ const envListCache = createEnvironmentListingCache();
 // Short-lived cache for the /api/list-deployments listing. The listing fans out
 // into many per-record `gh api` calls, so caching keeps the deploy page snappy
 // across re-opens and the workflow poll. Invalidated when a deploy or delete is
-// dispatched: the deployments route family is handed this same map and evicts
-// from there, while the deploy dispatch service evicts through the
-// `invalidateDeployListCache` seam bound below.
+// dispatched: the deployments route family is handed this same cache and
+// invalidates it there, while the deploy dispatch service invalidates through
+// the `invalidateDeployListCache` seam bound below. Like the environment
+// listing, a listing already in flight when that happens cannot cache what it
+// read.
 const DEPLOY_LIST_TTL_MS = 15000;
-const deployListCache = new Map<string, CachedPayload>();
+const deployListCache = createEnvironmentListingCache();
 
 // Both listing caches are module-scoped, so they outlive any single canvas
 // server instance. Callers that must not observe a listing captured under
-// different external state clear them wholesale through this seam.
+// different external state clear them wholesale through this seam. A clear also
+// stops a listing that is still in flight from caching what it read.
 export function resetListingCaches(
   environments: { clear(): void } = envListCache,
   deployments: { clear(): void } = deployListCache
@@ -6635,7 +6633,7 @@ export function createProductionCanvasServerRuntime(
       resolveEnvDeployment(repo, environment, application, cliExecPort),
     ghOrThrow: (args) => ghOrThrow(args, 12000, cliExecPort),
     invalidateDeployListCache: (repo) => {
-      deployListCache.delete(repo);
+      deployListCache.invalidate(repo);
     }
   });
   const deploymentAbandonmentService = createDeploymentAbandonmentViewService({
@@ -6775,5 +6773,5 @@ export { deploymentStatusBlocksMutation } from "@radius-project/core";
 export { createProductionDeploymentRuntime } from "./runtime/production-deployment.js";
 
 export function invalidateDeployListCache(repo: string): void {
-  deployListCache.delete(repo);
+  deployListCache.invalidate(repo);
 }
