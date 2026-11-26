@@ -23,8 +23,6 @@ import {
 } from "../../../src/source-refs.js";
 import {
   resolveExistingRadiusArtifact,
-  resolveRadiusArtifactTarget,
-  resolveStagingDirPrefix,
   validateGhcrTargetForRepo
 } from "../../../src/publish-targets.js";
 import {
@@ -45,6 +43,7 @@ import type {
   SessionPromptMessage
 } from "../../../src/server.js";
 import type { CanvasGraphResource } from "../../../src/shared.js";
+import type { RadiusModelingSkill } from "../../../src/skill.js";
 
 export interface FakeServer {
   close: Mock;
@@ -100,7 +99,6 @@ export interface FakeDependenciesOptions {
   // Answer for workspaceModelRecoverable. Defaults to true, the ordinary case
   // of a committed, unmodified model, so tests opt in to the risky states.
   modelRecoverable?: boolean;
-  generatorVersion?: string;
   // Radius version the installed CLI uses. Defaults to "0.60", the version the
   // shared origin fixtures record.
   radiusVersion?: string;
@@ -359,7 +357,6 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     rad: {
       buildGraphViaRad: vi.fn(async () => []),
       ensureRadBinary: vi.fn(async () => undefined),
-      runRadBicepPublishExtension: vi.fn(async () => undefined),
       runRadBicepPublish: vi.fn(async () => "br:ghcr.io/acme/widgets/recipe:v1")
     },
     deployment: createFakeDeploymentRuntime(),
@@ -387,8 +384,6 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     },
     publishTargets: {
       resolveExistingRadiusArtifact: vi.fn(resolveExistingRadiusArtifact),
-      resolveRadiusArtifactTarget: vi.fn(resolveRadiusArtifactTarget),
-      resolveStagingDirPrefix: vi.fn(resolveStagingDirPrefix),
       validateGhcrTargetForRepo: vi.fn(validateGhcrTargetForRepo)
     },
     hostCallbacks: {
@@ -433,7 +428,6 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       setupInFlight: vi.fn(() => false)
     },
     appModel: {
-      generatorVersion: vi.fn(() => options.generatorVersion ?? "0.1.0-test"),
       radiusVersion: vi.fn(async () => options.radiusVersion ?? "0.60"),
       workspaceHeadCommit: vi.fn(
         async (workspacePath: string | null | undefined) =>
@@ -467,9 +461,6 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     },
     beginManagedModel: vi.fn((workspace: string) => ({
       stagingDir: `${workspace}/.radius/.staging-managed-test`,
-      artifact: () => {
-        throw new Error("No test publication artifact configured");
-      },
       assertBaseline: vi.fn(),
       cancel: vi.fn(),
       validate: async () => {
@@ -479,16 +470,16 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         throw new Error("No test promotion configured");
       }
     })),
-    radiusAppBicepSkill: vi.fn((repoPath?: string, brief?: string) =>
-      JSON.stringify({
-        skill: "radius-app-bicep",
-        repoPath: repoPath || ".",
-        skillBase: "/test/skills/radius-app-bicep",
-        skillVersion: "0.1.0-test",
-        nodeCommand: "/test/bin/node",
-        instruction: `SKILL.md content for ${repoPath || "."}`,
-        ...(brief ? { brief } : {})
-      })
+    radiusSkillHandoff: vi.fn(
+      (skill: RadiusModelingSkill, repoPath?: string, brief?: string) =>
+        JSON.stringify({
+          skill,
+          repoPath: repoPath || ".",
+          skillBase: `/test/skills/${skill}`,
+          nodeCommand: "/test/bin/node",
+          instruction: `SKILL.md content for ${repoPath || "."}`,
+          ...(brief ? { brief } : {})
+        })
     ),
     renderPrDiffMarkdown,
     withGhcrDockerConfig: vi.fn(async (fn) =>

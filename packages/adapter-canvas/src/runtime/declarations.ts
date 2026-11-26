@@ -175,12 +175,12 @@ export const RADIUS_SESSION_START_CONTEXT = `When opening the Radius Canvas (can
 3. Treat the current Copilot session worktree branch as the graph branch. Do not default graph views to main for the session repo.
 In every example below, "<radius-instance>" means the existing Radius Canvas instanceId when one is open, or "${RADIUS_CANVAS_INSTANCE_ID}" only when none is open.
 
-When the user explicitly asks to create or update the application model, use radius_generate_app and follow the radius-app-bicep skill to completion. For a combined request such as "generate the model and show me the graph", this explicit-authoring instruction takes precedence over the graph-only flow below: complete authoring successfully, then open the requested graph.
+When the user explicitly asks to create or update the application model, use radius_generate_app and follow the radius-app-model skill to completion. For a combined request such as "generate the model and show me the graph", this explicit-authoring instruction takes precedence over the graph-only flow below: complete authoring successfully, then open the requested graph.
 
 When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases, without explicitly requesting model creation or updates:
 1. Open the graph Canvas first, without checking for or generating app.bicep: open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph", repo: "<current-repo>" } }).
-2. Let the Canvas detect a missing app.bicep and queue its automatic radius-app-bicep authoring handoff. Do not inspect the workspace or poll to detect a missing model, and do not start missing-model generation independently through radius_generate_app, the radius-app-bicep skill, or a delegated agent.
-3. After opening, do not wait for the model. Continue with any other part of the user's request, or end the turn. You may inspect an already-ready graph for missing source references. For that check, call get_graph_resources at most once; if ready is false, stop the reference check without waiting or retrying. Repair missing source references on a ready graph through the radius-app-graph skill's radius-app-bicep repair workflow.
+2. Let the Canvas detect a missing app.bicep and queue its automatic radius-app-model authoring handoff. Do not inspect the workspace or poll to detect a missing model, and do not start missing-model generation independently through radius_generate_app, the radius-app-model skill, or a delegated agent.
+3. After opening, do not wait for the model. Continue with any other part of the user's request, or end the turn. You may inspect an already-ready graph for missing source references. For that check, call get_graph_resources at most once; if ready is false, stop the reference check without waiting or retrying. Repair missing source references on a ready graph through the radius-app-graph skill's missing-reference repair workflow.
 
 For the current workspace repo and branch, the graph and planned pages render from the on-disk working tree, so no push is needed (modeling does not push). For a different repo or branch, the canvas reads .radius/app.bicep from that remote branch, so it must be committed and pushed there.
 
@@ -196,7 +196,7 @@ When the user asks to "show the diff", "compare branches", "app graph diff": ope
 
 CRITICAL: Once a Radius Canvas is open, always use its actual instanceId for every Radius Canvas operation. Use "${RADIUS_CANVAS_INSTANCE_ID}" only for the first open when no Radius instance exists.
 
-When planned graph resolution cannot resolve a resource type, distinguish two cases. (1) The type exists but no recipe or recipe pack is registered for it in the target Environment: report the unresolved type and explain that a recipe pack providing it must be registered to the environment; do NOT generate a custom type or an inline singleton recipe for this case. (2) No built-in type fits the needed backing service at all: the radius-app-bicep skill generates a custom resource type (namespace Radius.Resources) together with its own recipe pack, following the skill's custom-resource-types guidance (Azure scope for now). In both cases recipes are supplied via recipe packs, not inline per-type singleton recipes, so do NOT fabricate a singleton recipe in app.bicep or in the graph. If a needed service is not provisionable on Azure, report it to the user instead of inventing a type.
+When planned graph resolution cannot resolve a resource type, distinguish two cases. (1) The type exists but no recipe or recipe pack is registered for it in the target Environment: report the unresolved type and explain that a recipe pack providing it must be registered to the environment; do NOT generate a custom type or an inline singleton recipe for this case. (2) No built-in type fits the needed backing service at all: the radius-app-model skill defines a custom resource type (namespace Radius.Resources) following its references/custom-types.md, and the radius-app-plan skill gives it a Recipe pack following its references/custom-recipes.md (Azure scope for now). In both cases recipes are supplied via recipe packs, not inline per-type singleton recipes, so do NOT fabricate a singleton recipe in app.bicep or in the graph. If a needed service is not provisionable on Azure, report it to the user instead of inventing a type.
 
 ${RADIUS_FAILURE_REPORT_CONTEXT}`;
 
@@ -206,13 +206,13 @@ export interface ToolDeclaration {
   parameters: Record<string, unknown>;
 }
 
-// The 7 tools, in their current order. Declarative shape only — see tools.ts
+// The 6 tools, in their current order. Declarative shape only — see tools.ts
 // for the handlers.
 export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_generate_app",
     description:
-      "Starts Radius app.bicep authoring after checking whether the repository is modelable. For supported repositories, returns one JSON object with the radius-app-bicep skill name, repository path, packaged skill path, the absolute path of the Node.js interpreter the skill's scripts must run under (nodeCommand), instruction, optional generator version, and optional ambiguity brief. When the machine has no supported Node.js installation, returns a JSON object with nodeCommand set to null, the installations that were found and refused, and an instruction to stop and ask the user to install Node.js — never to download or install a runtime. For repositories without a Dockerfile, returns a Markdown refusal instead of invoking the skill handoff.",
+      "Starts Radius app.bicep authoring after checking whether the repository is modelable. For supported repositories, returns one JSON object with the radius-app-model skill name, repository path, packaged skill path, the absolute path of the Node.js interpreter the skill's scripts must run under (nodeCommand), instruction, and optional ambiguity brief. When the machine has no supported Node.js installation, returns a JSON object with nodeCommand set to null, the installations that were found and refused, and an instruction to stop and ask the user to install Node.js — never to download or install a runtime. For repositories without a Dockerfile, returns a Markdown refusal instead of invoking the skill handoff.",
     parameters: {
       type: "object",
       properties: {
@@ -226,7 +226,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_report_modeling_failure",
     description:
-      "Reports a permanent radius-app-bicep authoring failure that left the application definition missing or blank. Use only when the Canvas handoff supplies the exact instance, repository, branch, and attempt token; never report transient failures or cancellations.",
+      "Reports a permanent radius-app-model failure that left the application definition missing or blank. Use only when the Canvas handoff supplies the exact instance, repository, branch, and attempt token; never report transient failures or cancellations.",
     parameters: {
       type: "object",
       properties: {
@@ -282,7 +282,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_complete_app_authoring",
     description:
-      "Completes or cancels a managed Radius Canvas authoring handoff. Pass its request token. Completion validates the exact staged model and promotes it only if the originating worktree and attempt are still current.",
+      "Completes or cancels a Radius modeling run that the Canvas started (managedAuthoring in the handoff). Pass its requestToken. Completion checks the staged model again and publishes it only if the worktree and the Canvas request are still current.",
     parameters: {
       type: "object",
       properties: {
@@ -293,51 +293,16 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
     }
   },
   {
-    name: "radius_publish_custom_type_extension",
-    description:
-      "Compiles a Radius resource-type manifest into a local Bicep extension package using the extension's managed rad binary, so a generated app.bicep can reference the Radius.Resources/* custom types it declares. Use this instead of running `rad bicep publish-extension` directly. Produces a local .tgz (no registry, no authentication). Paths are confined to the workspace .radius/ directory.",
-    parameters: {
-      type: "object",
-      properties: {
-        requestToken: {
-          type: "string",
-          description:
-            "The managed authoring request token, when provided by the Canvas. Pass no paths with this token."
-        },
-        manifestPath: {
-          type: "string",
-          description:
-            "Path to the resource-type manifest, relative to the workspace .radius/ directory. Defaults to .radius/custom-types.yaml, or to the staging directory when stagingDir is given."
-        },
-        targetPath: {
-          type: "string",
-          description:
-            "Path for the compiled extension package (.tgz), relative to the workspace .radius/ directory. Defaults to .radius/custom-types.tgz, or to the staging directory when stagingDir is given."
-        },
-        stagingDir: {
-          type: "string",
-          description:
-            "Staging directory of the modeling run, relative to the workspace .radius/ directory (for example .staging-<runId>). Pass the directory promote-app-model.mjs --begin printed so the published package lands with the rest of the run instead of in .radius/."
-        }
-      }
-    }
-  },
-  {
     name: "radius_publish_recipe",
     description:
-      "Publishes an authored Radius recipe Bicep file to the user's GitHub Container Registry (ghcr.io) using the extension's managed rad binary and the stored GitHub package credentials, so a generated custom type's recipe pack can reference it. Use this instead of running `rad bicep publish` directly. Prefer an Azure Verified Module (which needs no publish) when one matches the resource. The recipe file must live under the workspace .radius/ directory and the target must publish under the repository being modeled.",
+      "Publishes an authored Radius Recipe that the radius-app-plan skill wrote (.radius/<name>-recipe.bicep) to the user's GitHub Container Registry (ghcr.io), using the extension's managed rad binary and the stored GitHub package credentials, so the custom type's Recipe pack can reference it. Call it only after the plan is published and only when the user agreed to publish the Recipe. Use this instead of running `rad bicep publish` directly. The Recipe file must be under the workspace .radius/ directory, and the target must publish under the repository being modeled.",
     parameters: {
       type: "object",
       properties: {
-        requestToken: {
-          type: "string",
-          description:
-            "The managed authoring request token, when provided by the Canvas."
-        },
         file: {
           type: "string",
           description:
-            "For managed authoring, the staged recipe filename only (e.g. <type>-recipe.bicep); otherwise the path relative to the workspace .radius/ directory."
+            "Path to the recipe Bicep file, relative to the workspace .radius/ directory (e.g. .radius/<type>-recipe.bicep)."
         },
         target: {
           type: "string",

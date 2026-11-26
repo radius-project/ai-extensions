@@ -5,8 +5,6 @@ import path from "node:path";
 import { test } from "vitest";
 import {
   resolveExistingRadiusArtifact,
-  resolveRadiusArtifactTarget,
-  resolveStagingDirPrefix,
   validateGhcrTargetForRepo
 } from "./publish-targets.js";
 
@@ -24,112 +22,62 @@ test("standalone publication refuses managed staging paths, including aliases", 
     const managed = path.join(ws, ".radius", ".staging-managed-fixture");
     fs.mkdirSync(managed, { recursive: true });
     fs.symlinkSync(managed, path.join(ws, ".radius", "alias"), "junction");
-    assert.throws(
-      () => resolveStagingDirPrefix(ws, ".staging-managed-fixture"),
-      /request token/
-    );
-    assert.throws(
-      () =>
-        resolveExistingRadiusArtifact(
-          ws,
-          ".staging-managed-fixture/example-recipe.bicep",
-          null
-        ),
-      /request token/
-    );
-    assert.throws(
-      () => resolveRadiusArtifactTarget(ws, "alias/custom-types.tgz", null),
-      /request token/
-    );
+    for (const file of [
+      ".staging-managed-fixture/example-recipe.bicep",
+      "alias/example-recipe.bicep"
+    ]) {
+      assert.throws(
+        () => resolveExistingRadiusArtifact(ws, file, null),
+        /run that the canvas started cannot be published/
+      );
+    }
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });
   }
 });
 
-test("resolveRadiusArtifactTarget confines relative paths under .radius/", () => {
-  assert.equal(
-    resolveRadiusArtifactTarget(WS, "custom-types.yaml", null),
-    path.join(RADIUS, "custom-types.yaml")
-  );
+test("resolveExistingRadiusArtifact confines relative paths under .radius/", () => {
+  // The radius-app-plan skill publishes its Recipe as .radius/<name>-recipe.bicep.
   // A leading .radius/ is accepted and normalized (not doubled).
   assert.equal(
-    resolveRadiusArtifactTarget(WS, ".radius/custom-types.tgz", null),
-    path.join(RADIUS, "custom-types.tgz")
+    resolveExistingRadiusArtifact(WS, ".radius/cache-recipe.bicep", null),
+    path.join(RADIUS, "cache-recipe.bicep")
   );
   assert.equal(
-    resolveRadiusArtifactTarget(WS, "sub/dir/x.bicep", null),
+    resolveExistingRadiusArtifact(WS, "sub/dir/x.bicep", null),
     path.join(RADIUS, "sub/dir/x.bicep")
   );
-});
-
-test("resolveRadiusArtifactTarget uses the fallback when no value is given", () => {
   assert.equal(
-    resolveRadiusArtifactTarget(WS, "", ".radius/custom-types.yaml"),
-    path.join(RADIUS, "custom-types.yaml")
-  );
-  assert.equal(
-    resolveRadiusArtifactTarget(WS, "   ", "custom-types.tgz"),
-    path.join(RADIUS, "custom-types.tgz")
+    resolveExistingRadiusArtifact(WS, "   ", "cache-recipe.bicep"),
+    path.join(RADIUS, "cache-recipe.bicep")
   );
 });
 
-test("resolveRadiusArtifactTarget verifies the nearest existing parent for a new nested target", () => {
+test("resolveExistingRadiusArtifact checks the nearest existing parent of a missing file", () => {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), "ws-parent-"));
   try {
     fs.mkdirSync(path.join(ws, ".radius", "existing"), { recursive: true });
     assert.equal(
-      resolveRadiusArtifactTarget(
+      resolveExistingRadiusArtifact(
         ws,
-        "existing/new/deeper/custom-types.tgz",
+        "existing/new/cache-recipe.bicep",
         null
       ),
-      path.join(ws, ".radius", "existing", "new", "deeper", "custom-types.tgz")
+      path.join(
+        fs.realpathSync(path.join(ws, ".radius", "existing")),
+        "new",
+        "cache-recipe.bicep"
+      )
     );
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });
   }
 });
 
-test("resolves new compiler targets below an in-tree junction to the same writer path", () => {
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "radius-output-alias-"));
-  try {
-    const root = path.join(ws, ".radius");
-    const output = path.join(root, "output");
-    fs.mkdirSync(output, { recursive: true });
-    fs.symlinkSync(output, path.join(root, "alias"), "junction");
-    const canonical = resolveRadiusArtifactTarget(
-      ws,
-      "output/new/types.tgz",
-      null
-    );
-    assert.equal(
-      canonical,
-      path.join(fs.realpathSync(output), "new", "types.tgz")
-    );
-    assert.equal(
-      resolveRadiusArtifactTarget(ws, "alias/new/types.tgz", null),
-      canonical
-    );
-  } finally {
-    fs.rmSync(ws, { recursive: true, force: true });
-  }
-});
-
-test("radius artifact resolvers reject absolute paths", () => {
-  assert.throws(
-    () => resolveRadiusArtifactTarget(WS, "/etc/passwd", null),
-    /not absolute/
-  );
+test("resolveExistingRadiusArtifact rejects absolute paths and traversal", () => {
   assert.throws(
     () => resolveExistingRadiusArtifact(WS, "/etc/passwd", null),
     /not absolute/
-  );
-});
-
-test("radius artifact resolvers reject parent-directory traversal", () => {
-  assert.throws(
-    () => resolveRadiusArtifactTarget(WS, "../../secret.tgz", null),
-    /invalid path/
   );
   assert.throws(
     () => resolveExistingRadiusArtifact(WS, ".radius/../secret", null),
@@ -137,13 +85,13 @@ test("radius artifact resolvers reject parent-directory traversal", () => {
   );
 });
 
-test("radius artifact resolvers require a workspace and a path", () => {
+test("resolveExistingRadiusArtifact requires a workspace and a path", () => {
   assert.throws(
-    () => resolveRadiusArtifactTarget("", "custom-types.yaml", null),
+    () => resolveExistingRadiusArtifact("", "cache-recipe.bicep", null),
     /No repository workspace/
   );
   assert.throws(
-    () => resolveRadiusArtifactTarget(WS, "", null),
+    () => resolveExistingRadiusArtifact(WS, "", null),
     /file path is required/
   );
 });
@@ -230,7 +178,7 @@ function symlinkCapable() {
 const SYMLINK_OK = symlinkCapable();
 
 test.skipIf(!SYMLINK_OK)(
-  "rejects a target reached through a symlinked directory that escapes .radius/",
+  "rejects a missing file reached through a symlinked directory that escapes .radius/",
   () => {
     const ws = fs.mkdtempSync(path.join(os.tmpdir(), "ws-sym-"));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), "outside-"));
@@ -239,7 +187,7 @@ test.skipIf(!SYMLINK_OK)(
       fs.symlinkSync(outside, path.join(ws, ".radius", "link"), "dir");
       // Lexically fine (no `..`), but `.radius/link` resolves outside the workspace.
       assert.throws(
-        () => resolveRadiusArtifactTarget(ws, "link/evil.tgz", null),
+        () => resolveExistingRadiusArtifact(ws, "link/evil.bicep", null),
         /via a symlink/
       );
     } finally {
@@ -270,87 +218,24 @@ test.skipIf(!SYMLINK_OK)(
 );
 
 test.skipIf(!SYMLINK_OK)(
-  "rejects a --force target that is itself a symlink pointing outside .radius/",
+  "allows a real file or subdirectory under .radius/",
   () => {
     const ws = fs.mkdtempSync(path.join(os.tmpdir(), "ws-sym-"));
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "outside-"));
     try {
-      fs.mkdirSync(path.join(ws, ".radius"), { recursive: true });
-      fs.writeFileSync(path.join(outside, "target.tgz"), "");
-      fs.symlinkSync(
-        path.join(outside, "target.tgz"),
-        path.join(ws, ".radius", "custom-types.tgz"),
-        "file"
+      fs.mkdirSync(path.join(ws, ".radius", "sub"), { recursive: true });
+      const p = resolveExistingRadiusArtifact(
+        ws,
+        "sub/cache-recipe.bicep",
+        null
       );
-      assert.throws(
-        () => resolveRadiusArtifactTarget(ws, "custom-types.tgz", null),
-        /via a symlink/
+      assert.ok(p.endsWith(path.join("sub", "cache-recipe.bicep")));
+      fs.writeFileSync(path.join(ws, ".radius", "cache-recipe.bicep"), "");
+      assert.equal(
+        resolveExistingRadiusArtifact(ws, ".radius/cache-recipe.bicep", null),
+        fs.realpathSync(path.join(ws, ".radius", "cache-recipe.bicep"))
       );
     } finally {
       fs.rmSync(ws, { recursive: true, force: true });
-      fs.rmSync(outside, { recursive: true, force: true });
     }
   }
 );
-
-test.skipIf(!SYMLINK_OK)("allows a real subdirectory under .radius/", () => {
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "ws-sym-"));
-  try {
-    fs.mkdirSync(path.join(ws, ".radius", "sub"), { recursive: true });
-    const p = resolveRadiusArtifactTarget(ws, "sub/custom-types.tgz", null);
-    assert.ok(p.endsWith(path.join("sub", "custom-types.tgz")));
-  } finally {
-    fs.rmSync(ws, { recursive: true, force: true });
-  }
-});
-
-// resolveStagingDirPrefix — a modeling run writes into `.radius/.staging-<runId>/`
-// and the publish tool's defaults have to move with it. The argument stays
-// confined under `.radius/` and must additionally name a direct `.staging-*`
-// child, so it cannot redirect the defaults anywhere else.
-test("resolveStagingDirPrefix returns a .radius-relative prefix", () => {
-  assert.equal(
-    resolveStagingDirPrefix(WS, ".staging-run-1"),
-    ".staging-run-1/"
-  );
-  assert.equal(
-    resolveStagingDirPrefix(WS, ".radius/.staging-run-1"),
-    ".staging-run-1/"
-  );
-});
-
-test("resolveStagingDirPrefix returns an empty prefix when no directory is given", () => {
-  for (const value of [undefined, null, "", "   "]) {
-    assert.equal(resolveStagingDirPrefix(WS, value), "");
-  }
-});
-
-test("resolveStagingDirPrefix rejects anything that is not a direct staging child", () => {
-  for (const value of [
-    "custom-types",
-    ".staging-",
-    "nested/.staging-run",
-    ".staging-run/nested",
-    "."
-  ]) {
-    assert.throws(
-      () => resolveStagingDirPrefix(WS, value),
-      /must be a \.staging-\* directory/
-    );
-  }
-});
-
-test("resolveStagingDirPrefix rejects paths that escape the workspace", () => {
-  assert.throws(
-    () => resolveStagingDirPrefix(WS, "../.staging-run"),
-    /invalid path/
-  );
-  assert.throws(
-    () => resolveStagingDirPrefix(WS, "/tmp/.staging-run"),
-    /not absolute/
-  );
-  assert.throws(
-    () => resolveStagingDirPrefix(null, ".staging-run"),
-    /No repository workspace is open/
-  );
-});

@@ -1,328 +1,224 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { NodeResolution } from "./node-executable.js";
-import { createRadiusAppBicepSkill, radiusAppBicepSkill } from "./skill.js";
+import {
+  createRadiusSkillHandoff,
+  radiusSkillHandoff,
+  type RadiusModelingSkill
+} from "./skill.js";
 
-const NO_NODE: NodeResolution = { executable: null, rejected: [] };
-
-const MODULE_DIR = path.join(
-  path.parse(process.cwd()).root,
-  "repo",
-  "packages",
-  "adapter-canvas",
-  "src"
-);
-const HOME_DIR = path.join(path.parse(process.cwd()).root, "home", "radius");
-const PLUGIN_ROOT = path.join(path.parse(process.cwd()).root, "plugin");
-const CANONICAL_MODULE_DIR = path.join(
-  PLUGIN_ROOT,
-  "com.github.copilot",
-  "extensions",
-  "radius"
-);
-const REQUIRED_FILES = [
-  "SKILL.md",
-  path.join("scripts", "validate-bicep.mjs"),
-  path.join("scripts", "bicep-security-rules.mjs"),
-  path.join("references", "source-code-references.md")
-];
+const ROOT = path.parse(process.cwd()).root;
+const MODULE_DIR = path.join(ROOT, "repo", "packages", "adapter-canvas", "src");
+const HOME_DIR = path.join(ROOT, "home", "radius");
+const PLUGIN_ROOT = path.join(ROOT, "plugin");
+const NODE = path.join(ROOT, "usr", "bin", "node");
 const INSTRUCTION =
-  "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase for <loaded-skill-base>. Substitute nodeCommand for <loaded-node>. Substitute skillVersion for <loaded-skill-version> only when skillVersion is present; otherwise leave <loaded-skill-version> unchanged so the skill omits the flag.";
-const NODE = path.join(path.parse(process.cwd()).root, "usr", "bin", "node");
-
-const CANDIDATES = {
-  installed: path.join(MODULE_DIR, "skills", "radius-app-bicep"),
-  source: path.resolve(
-    MODULE_DIR,
-    "../../../extensions/radius/skills/radius-app-bicep"
-  ),
-  repaired: path.join(
-    HOME_DIR,
-    ".copilot",
-    "installed-plugins",
-    "radius-plugins",
-    "radius",
-    "skills",
-    "radius-app-bicep"
-  )
+  "Continue with the loaded skill. If it is not loaded, read SKILL.md from skillBase. Use skillBase as <skill-dir>, and run the skill's scripts with nodeCommand instead of node. Put nodeCommand and each script path in double quotes, because either can contain spaces, such as C:\\Program Files\\nodejs\\node.exe. In PowerShell, start the command with &.";
+const SCRIPTS: Record<RadiusModelingSkill, string> = {
+  "radius-app-model": "model.mjs",
+  "radius-app-plan": "plan.mjs",
+  "radius-app-complete": "complete.mjs"
 };
 
-function requiredPaths(candidate: string): string[] {
-  return REQUIRED_FILES.map((required) => path.join(candidate, required));
-}
-
-function createSkill(
-  presentFiles: ReadonlyArray<string>,
-  skillVersion = "1.2.3",
-  moduleDir = MODULE_DIR,
-  node: NodeResolution = { executable: NODE, rejected: [] }
-) {
-  const present = new Set(presentFiles);
-  const pathExists = vi.fn((filePath: string) => present.has(filePath));
-  const generatorVersion = vi.fn(() => skillVersion);
-  const nodeExecutable = vi.fn(() => node);
+function candidates(skill: RadiusModelingSkill) {
   return {
-    pathExists,
-    generatorVersion,
-    nodeExecutable,
-    skill: createRadiusAppBicepSkill({
-      moduleDir,
-      homeDir: HOME_DIR,
-      pathExists,
-      generatorVersion,
-      nodeExecutable
-    })
+    installed: path.join(MODULE_DIR, "skills", skill),
+    source: path.resolve(
+      MODULE_DIR,
+      "../../../extensions/radius/skills",
+      skill
+    ),
+    reinstalled: path.join(
+      HOME_DIR,
+      ".copilot",
+      "installed-plugins",
+      "radius-plugins",
+      "radius",
+      "skills",
+      skill
+    )
   };
 }
 
-function parseHandoff(value: string): Record<string, unknown> {
+function requiredPaths(
+  skillBase: string,
+  skill: RadiusModelingSkill = "radius-app-model"
+): string[] {
+  return [
+    "SKILL.md",
+    path.join("scripts", SCRIPTS[skill]),
+    path.join("scripts", "common.mjs")
+  ].map((file) => path.join(skillBase, file));
+}
+
+function createSkill(
+  presentFiles: readonly string[],
+  node: NodeResolution = { executable: NODE, rejected: [] },
+  moduleDir = MODULE_DIR
+) {
+  const present = new Set(presentFiles);
+  return createRadiusSkillHandoff({
+    moduleDir,
+    homeDir: HOME_DIR,
+    pathExists: (filePath) => present.has(filePath),
+    nodeExecutable: () => node
+  });
+}
+
+function parse(value: string): Record<string, unknown> {
   return JSON.parse(value) as Record<string, unknown>;
 }
 
-describe("radiusAppBicepSkill", () => {
-  it("resolves packaged skills from the canonical bundle directory", () => {
-    const packaged = path.join(PLUGIN_ROOT, "skills", "radius-app-bicep");
-    const { skill } = createSkill(
-      requiredPaths(packaged),
-      "1.2.3",
-      CANONICAL_MODULE_DIR
-    );
-
-    expect(parseHandoff(skill("/workspace")).skillBase).toBe(packaged);
-  });
-
-  it("uses the complete source-checkout skill in the development runtime", () => {
-    const expected = path.resolve(
-      path.dirname(fileURLToPath(import.meta.url)),
-      "../../../extensions/radius/skills/radius-app-bicep"
-    );
-
-    expect(parseHandoff(radiusAppBicepSkill("/workspace")).skillBase).toBe(
-      expected
-    );
-  });
-
-  it.each([
-    [
-      "installed extension",
-      [
-        ...requiredPaths(CANDIDATES.installed),
-        ...requiredPaths(CANDIDATES.source),
-        ...requiredPaths(CANDIDATES.repaired)
-      ],
-      CANDIDATES.installed
-    ],
-    [
-      "source checkout",
-      [
-        ...requiredPaths(CANDIDATES.source),
-        ...requiredPaths(CANDIDATES.repaired)
-      ],
-      CANDIDATES.source
-    ],
-    ["repaired plugin", requiredPaths(CANDIDATES.repaired), CANDIDATES.repaired]
-  ])("selects the %s candidate in probe order", (_label, files, expected) => {
-    const { skill } = createSkill(files);
-
-    expect(parseHandoff(skill("/workspace")).skillBase).toBe(expected);
-  });
-
-  it.each(REQUIRED_FILES)(
-    "skips a candidate missing %s",
-    (missingRequiredFile) => {
-      const installedFiles = requiredPaths(CANDIDATES.installed).filter(
-        (filePath) =>
-          filePath !== path.join(CANDIDATES.installed, missingRequiredFile)
+describe("radiusSkillHandoff", () => {
+  it.each(Object.keys(SCRIPTS) as RadiusModelingSkill[])(
+    "finds each stage skill in the development checkout: %s",
+    (skill) => {
+      const expected = path.resolve(
+        path.dirname(fileURLToPath(import.meta.url)),
+        "../../../extensions/radius/skills",
+        skill
       );
-      const { skill } = createSkill([
-        ...installedFiles,
-        ...requiredPaths(CANDIDATES.source)
-      ]);
 
-      expect(parseHandoff(skill("/workspace")).skillBase).toBe(
-        CANDIDATES.source
+      expect(parse(radiusSkillHandoff(skill, "/workspace")).skillBase).toBe(
+        expected
       );
     }
   );
 
-  it("continues from an incomplete source checkout to the repaired plugin", () => {
-    const { skill } = createSkill([
-      path.join(CANDIDATES.source, "SKILL.md"),
-      ...requiredPaths(CANDIDATES.repaired)
+  it("resolves a packaged skill from the canonical bundle directory", () => {
+    const packaged = path.join(PLUGIN_ROOT, "skills", "radius-app-plan");
+    const skill = createSkill(
+      requiredPaths(packaged, "radius-app-plan"),
+      undefined,
+      path.join(PLUGIN_ROOT, "com.github.copilot", "extensions", "radius")
+    );
+
+    expect(parse(skill("radius-app-plan")).skillBase).toBe(packaged);
+  });
+
+  it("takes the first complete candidate in probe order", () => {
+    const { installed, source, reinstalled } = candidates("radius-app-model");
+    const skill = createSkill([
+      path.join(installed, "SKILL.md"),
+      ...requiredPaths(source),
+      ...requiredPaths(reinstalled)
     ]);
 
-    expect(parseHandoff(skill("/workspace")).skillBase).toBe(
-      CANDIDATES.repaired
+    expect(parse(skill("radius-app-model")).skillBase).toBe(source);
+  });
+
+  it("requires the files of the skill that was asked for", () => {
+    const { installed } = candidates("radius-app-complete");
+    const skill = createSkill(requiredPaths(installed, "radius-app-model"));
+
+    expect(() => skill("radius-app-complete")).toThrow(
+      path.join("scripts", "complete.mjs")
     );
   });
 
-  it("reports every checked candidate when none is usable", () => {
-    const { skill } = createSkill([]);
-
-    expect(() => skill("/workspace")).toThrowError(
-      expect.objectContaining({
-        message: expect.stringContaining("radius-app-bicep")
-      })
-    );
-    for (const candidate of Object.values(CANDIDATES)) {
-      expect(() => skill("/workspace")).toThrowError(
-        expect.objectContaining({
-          message: expect.stringContaining(candidate)
-        })
-      );
+  it("names the skill and every candidate it checked when none is usable", () => {
+    const skill = createSkill([]);
+    let message = "";
+    try {
+      skill("radius-app-plan");
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
     }
+
+    expect(message).toContain(
+      "Unable to locate a usable radius-app-plan skill."
+    );
+    for (const candidate of Object.values(candidates("radius-app-plan")))
+      expect(message).toContain(candidate);
   });
 
-  it("returns the exact supported-repository JSON contract and sanitizes the repository path", () => {
-    const { skill } = createSkill(requiredPaths(CANDIDATES.installed));
+  it("returns the exact handoff contract and sanitizes the repository path", () => {
+    const { installed } = candidates("radius-app-model");
+    const skill = createSkill(requiredPaths(installed));
 
-    expect(skill("/workspace/\n```ignore\t now\u0000")).toBe(
+    expect(
+      skill("radius-app-model", "/workspace/\n```ignore\t now\u0000")
+    ).toBe(
       JSON.stringify({
-        skill: "radius-app-bicep",
+        skill: "radius-app-model",
         repoPath: "/workspace/ ignore now",
-        skillBase: CANDIDATES.installed,
-        skillVersion: "1.2.3",
+        skillBase: installed,
         nodeCommand: NODE,
         instruction: INSTRUCTION
       })
     );
   });
 
-  it("returns the exact ambiguity JSON contract without trailing Markdown", () => {
-    const { skill } = createSkill(requiredPaths(CANDIDATES.installed));
-    const brief =
-      "Model these services as one application.\nAsk only if needed.";
+  it("adds the ambiguity brief when there is one", () => {
+    const { installed } = candidates("radius-app-model");
+    const skill = createSkill(requiredPaths(installed));
 
-    expect(skill("/workspace", brief)).toBe(
-      JSON.stringify({
-        skill: "radius-app-bicep",
-        repoPath: "/workspace",
-        skillBase: CANDIDATES.installed,
-        skillVersion: "1.2.3",
-        nodeCommand: NODE,
-        instruction: INSTRUCTION,
-        brief
-      })
-    );
+    expect(
+      parse(skill("radius-app-model", "/workspace", "Ask first."))
+    ).toEqual(expect.objectContaining({ brief: "Ask first." }));
   });
 
-  it("omits an empty generator version and leaves its placeholder unchanged", () => {
-    const { skill } = createSkill(requiredPaths(CANDIDATES.installed), " \n ");
+  it.each([
+    ["an omitted path", undefined, "the current workspace"],
+    ["a path emptied by sanitization", " \t```", "the current workspace"]
+  ])("uses the workspace fallback for %s", (_label, repoPath, expected) => {
+    const { installed } = candidates("radius-app-model");
+    const skill = createSkill(requiredPaths(installed));
 
-    expect(skill()).toBe(
-      JSON.stringify({
-        skill: "radius-app-bicep",
-        repoPath: "the current workspace",
-        skillBase: CANDIDATES.installed,
-        nodeCommand: NODE,
-        instruction: INSTRUCTION
-      })
-    );
-  });
-
-  it("uses the workspace fallback for a repository path emptied by sanitization", () => {
-    const { skill } = createSkill(requiredPaths(CANDIDATES.installed));
-
-    expect(parseHandoff(skill(" \t```")).repoPath).toBe(
-      "the current workspace"
-    );
+    expect(parse(skill("radius-app-model", repoPath)).repoPath).toBe(expected);
   });
 
   it("bounds the sanitized repository path", () => {
-    const { skill } = createSkill(requiredPaths(CANDIDATES.installed));
+    const { installed } = candidates("radius-app-model");
+    const skill = createSkill(requiredPaths(installed));
 
-    expect(String(parseHandoff(skill("a".repeat(300))).repoPath)).toHaveLength(
-      256
-    );
+    expect(
+      String(parse(skill("radius-app-model", "a".repeat(300))).repoPath)
+    ).toHaveLength(256);
   });
 
   describe("when the machine has no Node.js interpreter", () => {
-    it("refuses the run instead of handing the skill over", () => {
-      const { skill } = createSkill(
-        requiredPaths(CANDIDATES.installed),
-        "1.2.3",
-        MODULE_DIR,
-        NO_NODE
-      );
+    it("refuses the run without looking for the skill", () => {
+      const skill = createSkill([], { executable: null, rejected: [] });
 
-      const handoff = parseHandoff(skill("/workspace"));
+      const handoff = parse(skill("radius-app-complete", "/workspace"));
 
       expect(handoff).toEqual({
-        skill: "radius-app-bicep",
+        skill: "radius-app-complete",
         repoPath: "/workspace",
         nodeCommand: null,
-        instruction: expect.stringContaining("Node.js")
+        instruction: expect.stringContaining("Do not start the modeling run")
       });
-      expect(handoff.skillBase).toBeUndefined();
-    });
-
-    it("forbids obtaining a runtime and requires asking the user", () => {
-      const { skill } = createSkill([], "1.2.3", MODULE_DIR, NO_NODE);
-
-      const instruction = String(parseHandoff(skill()).instruction);
-
-      expect(instruction).toContain("Never download, install");
-      expect(instruction).toContain("ask them to install Node.js");
-      // The absent skill files never reach a lookup: a run that cannot execute
-      // a script must not fail with a skill-installation error instead.
-      expect(instruction).toContain("Do not start the modeling run");
+      expect(String(handoff.instruction)).toContain("Never download, install");
+      expect(String(handoff.instruction)).toContain(
+        "ask them to install Node.js"
+      );
     });
 
     it("names the installations it found and refused", () => {
-      const { skill } = createSkill(
-        requiredPaths(CANDIDATES.installed),
-        "1.2.3",
-        MODULE_DIR,
-        {
-          executable: null,
-          rejected: [
-            {
-              executable: "/usr/bin/node",
-              version: "v12.22.9",
-              reason: "unsupported-version"
-            },
-            { executable: "/opt/fake/node", version: null, reason: "not-node" },
-            {
-              executable: "/opt/we ird/$(id)/node",
-              version: null,
-              reason: "unsafe-path"
-            }
-          ]
-        }
-      );
+      const skill = createSkill([], {
+        executable: null,
+        rejected: [
+          {
+            executable: "/usr/bin/node",
+            version: "v12.22.9",
+            reason: "unsupported-version"
+          },
+          { executable: "/opt/fake/node", version: null, reason: "not-node" },
+          {
+            executable: "/opt/we ird/$(id)/node",
+            version: null,
+            reason: "unsafe-path"
+          }
+        ]
+      });
 
-      expect(parseHandoff(skill("/workspace")).rejectedRuntimes).toEqual([
+      expect(parse(skill("radius-app-model")).rejectedRuntimes).toEqual([
         "/usr/bin/node (v12.22.9, older than Node.js 18)",
         "/opt/fake/node (did not report a Node.js version)",
         "/opt/we ird/$(id)/node (path contains characters that are unsafe in a shell command)"
       ]);
-    });
-
-    it("omits the refused list when the machine had no candidate at all", () => {
-      const { skill } = createSkill(
-        requiredPaths(CANDIDATES.installed),
-        "1.2.3",
-        MODULE_DIR,
-        NO_NODE
-      );
-
-      expect(parseHandoff(skill("/workspace"))).not.toHaveProperty(
-        "rejectedRuntimes"
-      );
-    });
-
-    it("sanitizes the repository path in the refusal", () => {
-      const { skill } = createSkill(
-        requiredPaths(CANDIDATES.installed),
-        "1.2.3",
-        MODULE_DIR,
-        NO_NODE
-      );
-
-      expect(parseHandoff(skill(" \t```")).repoPath).toBe(
-        "the current workspace"
-      );
     });
   });
 });

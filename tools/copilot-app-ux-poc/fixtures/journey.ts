@@ -147,10 +147,10 @@ export function readJourneyConfig(
   return { enabled: true, config };
 }
 
-/** The prompt that starts the radius-app-bicep skill in the new session. */
+/** The prompt that starts the radius-app-model skill in the new session. */
 export function modelingPrompt(): string {
   return (
-    "Use the radius-app-bicep skill to generate the Radius application model " +
+    "Use the radius-app-model skill to generate the Radius application model " +
     "(.radius/app.bicep) for this repository. Do not commit or push. " +
     "Do not deploy. Stop when the model is staged."
   );

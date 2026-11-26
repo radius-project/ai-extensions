@@ -1,11 +1,12 @@
-// Resolves the Node.js runtime the radius-app-bicep skill scripts run under.
+// Resolves the Node.js runtime the Radius modeling skills' scripts run under.
 //
 // The Copilot app embeds its Node runtime inside the `copilot` executable and
 // ships no reusable `node` binary, so an agent told to run `node script.mjs`
 // from a shell whose PATH has no Node has historically downloaded one. The
-// skill therefore never names a bare `node`: it runs the interpreter this
-// resolver found, and stops and asks the user when there is none. Resolution is
-// read-only — it locates an existing installation and never installs one.
+// canvas handoff (skill.ts) therefore tells the agent to run the skill's
+// scripts with the interpreter this resolver found instead of a bare `node`,
+// and to stop and ask the user when there is none. Resolution is read-only — it
+// locates an existing installation and never installs one.
 //
 // A candidate must also prove it is a usable Node: the scripts use only
 // `node:` builtin imports, `import.meta.url`, and logical assignment, so
@@ -63,10 +64,11 @@ function majorVersion(version: string | null): number | null {
   return match ? Number(match[1]) : null;
 }
 
-// The skill substitutes nodeCommand into a double-quoted argument of a shell
-// command line, so a path carrying shell syntax could change that command. Such
-// a path is refused rather than escaped: no real installation contains these
-// characters, and rewriting one would be a guess about the user's shell.
+// The canvas handoff tells the agent to put nodeCommand in double quotes on a
+// shell command line, so a path carrying shell syntax could change that
+// command. Such a path is refused rather than escaped: no real installation
+// contains these characters, and rewriting one would be a guess about the
+// user's shell.
 const POSIX_UNSAFE = /["`$\\]|[\u0000-\u001F]/u;
 const WINDOWS_UNSAFE = /["`$%]|[\u0000-\u001F]/u;
 

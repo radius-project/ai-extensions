@@ -5,9 +5,6 @@
 // release is recorded as `major.minor` (0.60), because Radius publishes one set
 // of types per minor version. A prerelease is recorded as its exact tag
 // (0.61.0-rc1). An edge build is recorded as `latest`.
-//
-// Kept free of imports so the bundled show-radius-type.mjs script can load this
-// file directly, the same way it loads adapter-shared's rad-release.ts.
 
 interface RadiusVersion {
   major: number;

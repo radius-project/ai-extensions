@@ -111,7 +111,7 @@
   "tools": [
     {
       "name": "radius_generate_app",
-      "description": "Starts Radius app.bicep authoring after checking whether the repository is modelable. For supported repositories, returns one JSON object with the radius-app-bicep skill name, repository path, packaged skill path, the absolute path of the Node.js interpreter the skill's scripts must run under (nodeCommand), instruction, optional generator version, and optional ambiguity brief. When the machine has no supported Node.js installation, returns a JSON object with nodeCommand set to null, the installations that were found and refused, and an instruction to stop and ask the user to install Node.js — never to download or install a runtime. For repositories without a Dockerfile, returns a Markdown refusal instead of invoking the skill handoff.",
+      "description": "Starts Radius app.bicep authoring after checking whether the repository is modelable. For supported repositories, returns one JSON object with the radius-app-model skill name, repository path, packaged skill path, the absolute path of the Node.js interpreter the skill's scripts must run under (nodeCommand), instruction, and optional ambiguity brief. When the machine has no supported Node.js installation, returns a JSON object with nodeCommand set to null, the installations that were found and refused, and an instruction to stop and ask the user to install Node.js — never to download or install a runtime. For repositories without a Dockerfile, returns a Markdown refusal instead of invoking the skill handoff.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -125,7 +125,7 @@
     },
     {
       "name": "radius_report_modeling_failure",
-      "description": "Reports a permanent radius-app-bicep authoring failure that left the application definition missing or blank. Use only when the Canvas handoff supplies the exact instance, repository, branch, and attempt token; never report transient failures or cancellations.",
+      "description": "Reports a permanent radius-app-model failure that left the application definition missing or blank. Use only when the Canvas handoff supplies the exact instance, repository, branch, and attempt token; never report transient failures or cancellations.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -190,56 +190,37 @@
     },
     {
       "name": "radius_complete_app_authoring",
-      "description": "Completes or cancels a managed Radius Canvas authoring handoff. Pass its request token. Completion validates the exact staged model and promotes it only if the originating worktree and attempt are still current.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "requestToken": { "type": "string" },
-          "outcome": { "type": "string", "enum": ["complete", "cancel"] }
-        },
-        "required": ["requestToken", "outcome"]
-      },
-      "handlerCallable": true
-    },
-    {
-      "name": "radius_publish_custom_type_extension",
-      "description": "Compiles a Radius resource-type manifest into a local Bicep extension package using the extension's managed rad binary, so a generated app.bicep can reference the Radius.Resources/* custom types it declares. Use this instead of running `rad bicep publish-extension` directly. Produces a local .tgz (no registry, no authentication). Paths are confined to the workspace .radius/ directory.",
+      "description": "Completes or cancels a Radius modeling run that the Canvas started (managedAuthoring in the handoff). Pass its requestToken. Completion checks the staged model again and publishes it only if the worktree and the Canvas request are still current.",
       "parameters": {
         "type": "object",
         "properties": {
           "requestToken": {
-            "type": "string",
-            "description": "The managed authoring request token, when provided by the Canvas. Pass no paths with this token."
+            "type": "string"
           },
-          "manifestPath": {
+          "outcome": {
             "type": "string",
-            "description": "Path to the resource-type manifest, relative to the workspace .radius/ directory. Defaults to .radius/custom-types.yaml, or to the staging directory when stagingDir is given."
-          },
-          "targetPath": {
-            "type": "string",
-            "description": "Path for the compiled extension package (.tgz), relative to the workspace .radius/ directory. Defaults to .radius/custom-types.tgz, or to the staging directory when stagingDir is given."
-          },
-          "stagingDir": {
-            "type": "string",
-            "description": "Staging directory of the modeling run, relative to the workspace .radius/ directory (for example .staging-<runId>). Pass the directory promote-app-model.mjs --begin printed so the published package lands with the rest of the run instead of in .radius/."
+            "enum": [
+              "complete",
+              "cancel"
+            ]
           }
-        }
+        },
+        "required": [
+          "requestToken",
+          "outcome"
+        ]
       },
       "handlerCallable": true
     },
     {
       "name": "radius_publish_recipe",
-      "description": "Publishes an authored Radius recipe Bicep file to the user's GitHub Container Registry (ghcr.io) using the extension's managed rad binary and the stored GitHub package credentials, so a generated custom type's recipe pack can reference it. Use this instead of running `rad bicep publish` directly. Prefer an Azure Verified Module (which needs no publish) when one matches the resource. The recipe file must live under the workspace .radius/ directory and the target must publish under the repository being modeled.",
+      "description": "Publishes an authored Radius Recipe that the radius-app-plan skill wrote (.radius/<name>-recipe.bicep) to the user's GitHub Container Registry (ghcr.io), using the extension's managed rad binary and the stored GitHub package credentials, so the custom type's Recipe pack can reference it. Call it only after the plan is published and only when the user agreed to publish the Recipe. Use this instead of running `rad bicep publish` directly. The Recipe file must be under the workspace .radius/ directory, and the target must publish under the repository being modeled.",
       "parameters": {
         "type": "object",
         "properties": {
-          "requestToken": {
-            "type": "string",
-            "description": "The managed authoring request token, when provided by the Canvas."
-          },
           "file": {
             "type": "string",
-            "description": "For managed authoring, the staged recipe filename only (e.g. <type>-recipe.bicep); otherwise the path relative to the workspace .radius/ directory."
+            "description": "Path to the recipe Bicep file, relative to the workspace .radius/ directory (e.g. .radius/<type>-recipe.bicep)."
           },
           "target": {
             "type": "string",
@@ -584,24 +565,18 @@
       "skill",
       "repoPath",
       "skillBase",
-      "skillVersion",
       "nodeCommand",
       "instruction"
     ],
-    "skill": "radius-app-bicep",
+    "skill": "radius-app-model",
     "repoPathMatchesWorkspace": true,
-    "skillBaseRelativeToArtifact": "skills/radius-app-bicep",
-    "skillVersionMatchesPackage": true,
+    "skillBaseRelativeToArtifact": "skills/radius-app-model",
     "nodeCommandRunsScripts": true,
-    "instruction": "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase for <loaded-skill-base>. Substitute nodeCommand for <loaded-node>. Substitute skillVersion for <loaded-skill-version> only when skillVersion is present; otherwise leave <loaded-skill-version> unchanged so the skill omits the flag.",
+    "instruction": "Continue with the loaded skill. If it is not loaded, read SKILL.md from skillBase. Use skillBase as <skill-dir>, and run the skill's scripts with nodeCommand instead of node. Put nodeCommand and each script path in double quotes, because either can contain spaces, such as C:\\Program Files\\nodejs\\node.exe. In PowerShell, start the command with &.",
     "requiredFiles": [
       "SKILL.md",
-      "scripts/promote-app-model.mjs",
-      "scripts/validate-bicep.mjs",
-      "scripts/bicep-security-rules.mjs",
-      "scripts/write-app-origin.mjs",
-      "references/source-code-references.md"
-    ],
-    "containsLegacyInlinedHeading": false
+      "scripts/model.mjs",
+      "scripts/common.mjs"
+    ]
   }
 }

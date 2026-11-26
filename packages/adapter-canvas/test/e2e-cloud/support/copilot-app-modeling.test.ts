@@ -19,8 +19,8 @@ const MODEL =
 const ORIGIN = {
   generatedAt: new Date(1_000).toISOString(),
   sourceCommit: BASELINE,
-  skillVersion: "0.2.1",
-  appBicepHash: hashAppBicep(MODEL)
+  appBicepHash: hashAppBicep(MODEL),
+  stage: "complete"
 };
 const CONTENT = {
   model: MODEL,
@@ -44,7 +44,8 @@ describe("cloudModelingPrompt", () => {
   it("asks for a fresh model with the fixed name and no publication", () => {
     const prompt = cloudModelingPrompt("cloud-e2e");
     expect(prompt).toContain("Do not restore it from Git");
-    expect(prompt).toContain("radius-app-bicep skill");
+    expect(prompt).toContain("radius-app-model skill");
+    expect(prompt).toContain("radius-app-complete skills");
     expect(prompt).toContain('Name the Radius application "cloud-e2e".');
     expect(prompt).toContain("Do not commit, push, or deploy.");
   });
@@ -248,6 +249,12 @@ describe("classifyModelReadiness", () => {
       "different source commit"
     ],
     ["edited model", CONTENT.originText, "changed", "does not match"],
+    [
+      "Stage 1 model",
+      JSON.stringify({ ...ORIGIN, stage: "model" }),
+      MODEL,
+      "does not record a completed model"
+    ],
     ["missing model", CONTENT.originText, undefined, "does not match"]
   ])(
     "refuses %s despite fresh stable file timestamps",

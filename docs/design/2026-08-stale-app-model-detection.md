@@ -2,6 +2,7 @@
 
 - **Author**: Karishma Chawla (@kachawla)
 - **Date**: 2026-08
+- **Status**: The generator-version check (`skillVersion` and `generator-changed`) was removed when the staged skills replaced `radius-app-bicep`. The origin record now also records the `stage` and `provider` that produced the model.
 
 ## Current state
 

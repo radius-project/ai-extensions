@@ -257,7 +257,7 @@ export {
   freshnessIdentity,
   normalizeAppBicep,
   parseAppOrigin,
-  serializeAppOrigin,
+  stagesBeforeDeploy,
   RECIPE_PACK_REF,
   IGNORED_SOURCE_DIRS,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
@@ -292,6 +292,7 @@ export type {
   AppModelFreshness,
   AppModelFreshnessInput,
   AppModelFreshnessStatus,
+  AppModelStage,
   AppOrigin
 } from "./modeling/index.js";
 export {

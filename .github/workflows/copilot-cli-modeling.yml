@@ -5,7 +5,7 @@ name: Copilot CLI Modeling
 # Runs Copilot CLI with the Radius plugin built from this checkout. The CLI
 # uses the version and the settings of the GitHub Copilot app. For each case
 # in scripts/copilot-cli-modeling/cases, the run sends the dataset prompt and
-# passes when the agent loads the radius-app-bicep skill and the skill
+# passes when the agent loads the radius-app-model skill and the skill
 # publishes .radius/app.bicep. See scripts/copilot-cli-modeling/README.md.
 #
 # Daily and by hand only, never on a push or a pull request. The agent runs in

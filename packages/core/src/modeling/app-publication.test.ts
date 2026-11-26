@@ -9,13 +9,9 @@ const workspace = async () => ({
 function fixture() {
   const ports = {
     resolveExisting: vi.fn((_workspace, value, fallback) => value ?? fallback),
-    resolveTarget: vi.fn((_workspace, value, fallback) => value ?? fallback),
-    stagingPrefix: vi.fn(() => ".staging-run/"),
     validateRegistryTarget: vi.fn<() => string | null>(() => null),
     isUnconfirmedExit: vi.fn((_error: unknown) => false),
-    localTargetKey: (target: string) => target.toLowerCase(),
     exists: vi.fn(() => true),
-    compileExtension: vi.fn(async () => {}),
     publishRecipe: vi.fn(async () => "registry reference")
   };
   return { ports, publication: createAppPublication(ports) };
@@ -50,38 +46,15 @@ describe("application publication", () => {
     expect(drained).toHaveBeenCalledExactlyOnceWith(true);
   });
 
-  it("compiles staged assets locally without publishing to the registry", async () => {
-    const { ports, publication } = fixture();
-    await expect(
-      publication.compileExtension("workspace", {})
-    ).resolves.toEqual({
-      kind: "compiled",
-      target: ".radius/.staging-run/custom-types.tgz"
-    });
-    expect(ports.compileExtension).toHaveBeenCalledWith(
-      ".radius/.staging-run/custom-types.yaml",
-      ".radius/.staging-run/custom-types.tgz",
-      "workspace"
-    );
-    expect(ports.publishRecipe).not.toHaveBeenCalled();
-  });
-
-  it("refuses missing assets without calling either writer", async () => {
+  it("refuses a missing Recipe file without calling the writer", async () => {
     const { ports, publication } = fixture();
     ports.exists.mockReturnValue(false);
-    await expect(
-      publication.compileExtension("workspace", {})
-    ).resolves.toEqual({
-      kind: "missing",
-      path: ".radius/.staging-run/custom-types.yaml"
-    });
     await expect(
       publication.publishRecipe(workspace, { file: "recipe" })
     ).resolves.toEqual({
       kind: "missing",
       path: "recipe"
     });
-    expect(ports.compileExtension).not.toHaveBeenCalled();
     expect(ports.publishRecipe).not.toHaveBeenCalled();
   });
 
@@ -182,26 +155,6 @@ describe("application publication", () => {
         kind: "published"
       }
     );
-  });
-
-  it("blocks a standalone compiler from reusing an unconfirmed managed output path", async () => {
-    const { ports, publication } = fixture();
-    const target = ".radius/.staging-run/custom-types.tgz";
-    const unconfirmed = new Error("Windows process tree exit unconfirmed");
-    ports.isUnconfirmedExit.mockImplementation(
-      (error) => error === unconfirmed
-    );
-    await expect(
-      publication.enqueue(publication.extensionKey(target), async () => {
-        throw unconfirmed;
-      })
-    ).rejects.toBe(unconfirmed);
-    await expect(
-      publication.compileExtension("workspace", {
-        targetPath: target.toUpperCase()
-      })
-    ).rejects.toThrow("previous process tree");
-    expect(ports.compileExtension).not.toHaveBeenCalled();
   });
 
   it("holds an already queued same-tag call and refuses it without starting after an unconfirmed exit", async () => {

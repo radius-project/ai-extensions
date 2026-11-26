@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import type {
   CommittedModelIdentity,
   ObservedModelFile
-} from "../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
+} from "../app-model-staging.js";
 import {
   APP_ORIGIN_REPO_PATH,
   APP_ORIGIN_ROOT_PATH,
@@ -175,7 +175,10 @@ export function createGraphContextHelpers(
     source: GraphSourceIdentity,
     observed: ObservedModelFile[]
   ): Promise<string | null> {
-    for (const repoPath of [APP_ORIGIN_REPO_PATH, APP_ORIGIN_ROOT_PATH]) {
+    for (const repoPath of [
+      APP_ORIGIN_REPO_PATH,
+      APP_ORIGIN_ROOT_PATH
+    ] as const) {
       const read = await deps.graphSources.readFile(source, repoPath);
       if (read.status === "unavailable") {
         if (
@@ -224,7 +227,6 @@ export function createGraphContextHelpers(
         deps.appModel
           .workspaceModelRecoverable(workspacePath)
           .catch(() => undefined),
-      generatorVersion: () => deps.appModel.generatorVersion(),
       radiusVersion: () => deps.appModel.radiusVersion().catch(() => ""),
       hashAppBicep
     });

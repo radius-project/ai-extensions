@@ -466,7 +466,7 @@ describe("graphs-planning load-graph-stream route", () => {
       event: "done",
       data: {
         error:
-          "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.",
+          "Copilot is generating .radius/app.bicep with the radius-app-model skill.",
         needsAppBicep: true,
         repo: REPO,
         branch: DEFAULT_BRANCH

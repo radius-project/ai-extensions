@@ -49,7 +49,9 @@ export const MAX_BASELINE_BYTES = 5 * 1024 * 1024;
 // when it runs from source, and packages extend the root tsconfig.json.
 const VISUAL_INPUT_PREFIXES = [
   "packages/",
-  "extensions/radius/skills/radius-app-bicep/"
+  "extensions/radius/skills/radius-app-model/",
+  "extensions/radius/skills/radius-app-plan/",
+  "extensions/radius/skills/radius-app-complete/"
 ];
 const VISUAL_INPUT_FILES = new Set([
   ".dockerignore",

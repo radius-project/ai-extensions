@@ -70,6 +70,7 @@ import {
   type WorkflowExecution
 } from "@radius-project/adapter-shared";
 import { createDeployModelSource } from "../../../src/server/services/deploy-model-source.js";
+import { hashAppBicep } from "../../../src/app-bicep-hash.js";
 import { createDeployOutcomeService } from "../../../src/server/services/deploy-outcome.js";
 import {
   DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE,
@@ -2757,6 +2758,7 @@ interface DeployHarness {
   monitorCalls: DeployMonitorRequest[];
   branchLookups: string[][];
   handoffs: string[];
+  readinessHandoffs: { prompt: string; displayPrompt: string }[];
   observationDelays: number[];
   stateOf(instanceId: string): CanvasState;
   settleMonitor(error?: Error): Promise<void>;
@@ -2785,6 +2787,7 @@ function startDeploy(
   const monitorCalls: DeployMonitorRequest[] = [];
   const branchLookups: string[][] = [];
   const handoffs: string[] = [];
+  const readinessHandoffs: { prompt: string; displayPrompt: string }[] = [];
   const observationDelays: number[] = [];
   const pendingMonitors: {
     release(error?: Error): void;
@@ -2881,7 +2884,11 @@ function startDeploy(
       throw error;
     },
     errorMessage: (error) =>
-      error instanceof Error ? error.message : String(error)
+      error instanceof Error ? error.message : String(error),
+    skillHandoff: (skill) => `{"skill":"${skill}"}`,
+    sendHandoff: async (message) => {
+      readinessHandoffs.push(message);
+    }
   });
 
   const routes = createTestRouteTable(
@@ -2988,6 +2995,7 @@ function startDeploy(
     monitorCalls,
     branchLookups,
     handoffs,
+    readinessHandoffs,
     observationDelays,
     stateOf: (instanceId) => {
       const entry = container?.instances.get(instanceId);
@@ -3474,6 +3482,55 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     expect(h.runtime.owner.hasActiveWork()).toBe(false);
     expect(h.monitorCalls).toEqual([]);
   });
+
+  it.each([
+    ["model", 409, 1],
+    ["complete", 200, 0]
+  ] as const)(
+    "gates a %s-stage model on its origin record before shared admission",
+    async (stage, status, handoffs) => {
+      const model =
+        "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
+      const origin = JSON.stringify({
+        generatedAt: "2026-11-01T00:00:00Z",
+        sourceCommit: "a".repeat(40),
+        radiusVersion: "0.60",
+        appBicepHash: hashAppBicep(model),
+        stage,
+        provider: "azure"
+      });
+      const h = startDeploy(undefined, {
+        readModelForSelection: async (_entry, _repo, _branch, path) => ({
+          status: "available",
+          content: path === ".radius/app.origin.json" ? origin : model,
+          fromWorkspace: false
+        })
+      });
+      const entry = await container!.getOrCreate("panel-a");
+
+      const response = await post(entry.baseUrl, "/api/deploy", deployBody());
+
+      expect(response.status).toBe(status);
+      expect(response.headers.get("content-type")).toContain(
+        "application/json"
+      );
+      expect(h.readinessHandoffs).toHaveLength(handoffs);
+      if (status === 409) {
+        expect(await response.json()).toEqual({
+          error: expect.stringContaining(
+            "The application model is not ready to deploy"
+          )
+        });
+        expect(h.readinessHandoffs[0]?.displayPrompt).toBe(
+          "Making the application model for acme/widgets (branch `feat`) ready to deploy to azure."
+        );
+        expect(h.runtime.owner.lookup()).toEqual({ kind: "missing" });
+        expect(h.monitorCalls).toEqual([]);
+      } else {
+        await expect.poll(() => h.monitorCalls.length).toBe(1);
+      }
+    }
+  );
 
   it.each([null, 42, "../app.bicep", ""])(
     "rejects malformed HTTP model path %j before shared admission",

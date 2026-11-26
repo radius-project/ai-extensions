@@ -3,7 +3,7 @@
 // checkout for generated app model files on the active branch.
 
 import { execFile } from "node:child_process";
-import { isManagedRun } from "../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
+import { isManagedRun } from "./app-model-staging.js";
 import {
   safeWorkspacePath,
   readWorkspaceFile,

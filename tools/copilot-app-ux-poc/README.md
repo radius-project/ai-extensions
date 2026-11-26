@@ -92,8 +92,8 @@ The journey is off by default. `npm test` skips it. When `COPILOT_APP_E2E_JOURNE
 ### Steps of the journey
 
 1. **Check the fixture.** The default branch must point to the baseline SHA, and the baseline must not contain `.radius/app.bicep`.
-2. **Model the app.** On the **New** page, the journey selects the fixture project, sets **Autopilot** mode, and sends a prompt that runs the `radius-app-bicep` skill. It reads the worktree path from the session information dialog.
-3. **Wait for the model.** It waits until `.radius/app.bicep`, `bicepconfig.json`, and `app.origin.json` exist and are staged. The skill stages them as its last step. Then it attaches `app.bicep` to the report.
+2. **Model the app.** On the **New** page, the journey selects the fixture project, sets **Autopilot** mode, and sends a prompt that runs the `radius-app-model` skill. It reads the worktree path from the session information dialog.
+3. **Wait for the model.** It waits until `.radius/app.bicep`, `bicepconfig.json`, and `app.origin.json` exist and are staged. The skill's check publishes and stages them when the model passes. Then it attaches `app.bicep` to the report.
 4. **Show the graph.** It opens the Radius canvas and waits for a graph node.
 5. **Publish the model.** It commits the model in the session worktree and pushes it to the fixture default branch. This must be a fast-forward from the baseline. The deploy flow reads `app.bicep` from GitHub, so this step is necessary.
 6. **Create the environment.** It uses the credential profile, or creates it on the credentials page. Then it creates the environment and waits for the operation to succeed.

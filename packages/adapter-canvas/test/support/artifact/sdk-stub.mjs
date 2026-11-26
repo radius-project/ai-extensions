@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
 let joinCount = 0;
@@ -33,14 +33,9 @@ export async function runArtifactReadiness() {
 
 const REQUIRED_SKILL_FILES = [
   "SKILL.md",
-  "scripts/promote-app-model.mjs",
-  "scripts/validate-bicep.mjs",
-  "scripts/bicep-security-rules.mjs",
-  "scripts/write-app-origin.mjs",
-  "references/source-code-references.md"
+  "scripts/model.mjs",
+  "scripts/common.mjs"
 ];
-const LEGACY_INLINED_HEADING =
-  "# radius-app-bicep skill (bundled with the Radius extension)";
 
 // The skill scripts are launched through the interpreter the bootstrap names,
 // so the artifact contract is that the named path really runs a script rather
@@ -81,19 +76,9 @@ export async function joinSession(declaration) {
   const bootstrap = JSON.parse(String(bootstrapText));
   const artifactDir = resolve(process.env.RADIUS_ARTIFACT_ROOT);
   const skillBase = String(bootstrap.skillBase);
-  const packageVersion = JSON.parse(
-    readFileSync(join(artifactDir, "package.json"), "utf8")
-  ).version;
   await send({
     type: "registered",
-    snapshot: snapshot(
-      declaration,
-      bootstrap,
-      bootstrapText,
-      artifactDir,
-      skillBase,
-      packageVersion
-    )
+    snapshot: snapshot(declaration, bootstrap, artifactDir, skillBase)
   });
   return session();
 }
@@ -102,15 +87,9 @@ export async function assertArtifactPublicationRefusals() {
   const completeAuthoring = joinedDeclaration?.tools.find(
     (tool) => tool.name === "radius_complete_app_authoring"
   );
-  const compileExtension = joinedDeclaration?.tools.find(
-    (tool) => tool.name === "radius_publish_custom_type_extension"
-  );
   const publishRecipe = joinedDeclaration?.tools.find(
     (tool) => tool.name === "radius_publish_recipe"
   );
-  const compilationRefusal = await compileExtension?.handler({
-    stagingDir: ".radius/not-a-staging-directory"
-  });
   const publicationRefusal = await publishRecipe?.handler({
     target: "br:example.invalid/fixture/app/recipe:1"
   });
@@ -118,33 +97,19 @@ export async function assertArtifactPublicationRefusals() {
     requestToken: "expired-artifact-fixture",
     outcome: "complete"
   });
-  const staleCompilation = await compileExtension?.handler({
-    requestToken: "expired-artifact-fixture"
-  });
   if (
     staleCompletion?.kind !== "refused" ||
-    !String(staleCompilation).includes("Unknown or expired") ||
-    !String(compilationRefusal).startsWith(
-      "⚠️ Could not publish the custom-type extension:"
-    ) ||
     !/Cannot determine the repository being modeled|The recipe target must be br:ghcr\.io/.test(
       String(publicationRefusal)
     )
   ) {
     throw new Error(
-      "The packaged publication tools did not refuse invalid inputs."
+      "The packaged authoring tools did not refuse invalid inputs."
     );
   }
 }
 
-function snapshot(
-  declaration,
-  bootstrap,
-  bootstrapText,
-  artifactDir,
-  skillBase,
-  packageVersion
-) {
+function snapshot(declaration, bootstrap, artifactDir, skillBase) {
   return {
     joinCount,
     canvases: declaration.canvases.map((canvas) => ({
@@ -182,14 +147,10 @@ function snapshot(
         "\\",
         "/"
       ),
-      skillVersionMatchesPackage: bootstrap.skillVersion === packageVersion,
       nodeCommandRunsScripts: runsScripts(bootstrap.nodeCommand),
       instruction: bootstrap.instruction,
       requiredFiles: REQUIRED_SKILL_FILES.filter((requiredFile) =>
         existsSync(join(skillBase, requiredFile))
-      ),
-      containsLegacyInlinedHeading: String(bootstrapText).includes(
-        LEGACY_INLINED_HEADING
       )
     }
   };

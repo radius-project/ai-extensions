@@ -594,7 +594,7 @@ describe("graphs-planning writes real-loopback HIT", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       error:
-        "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.",
+        "Copilot is generating .radius/app.bicep with the radius-app-model skill.",
       needsAppBicep: true,
       repo: "octo/app",
       branch: "main"

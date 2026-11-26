@@ -298,8 +298,8 @@ describe("summarizeSessionEvents", () => {
     const events = [
       { type: "session.start", data: { selectedModel: "model-a" } },
       { type: "assistant.message", data: { model: "model-a", content: "a" } },
-      { type: "skill.invoked", data: { name: "radius-app-bicep" } },
-      { type: "skill.invoked", data: { name: "radius-app-bicep" } },
+      { type: "skill.invoked", data: { name: "radius-app-model" } },
+      { type: "skill.invoked", data: { name: "radius-app-model" } },
       { type: "tool.execution_start", data: { toolName: "bash" } },
       { type: "tool.execution_start", data: { toolName: "bash" } },
       { type: "tool.execution_start", data: { toolName: "view" } },
@@ -310,7 +310,7 @@ describe("summarizeSessionEvents", () => {
     expect(summarizeSessionEvents(`${jsonl(events)}\n{"type":`)).toEqual({
       state: { kind: "completed" },
       models: ["model-a", "model-b"],
-      skills: ["radius-app-bicep"],
+      skills: ["radius-app-model"],
       tools: { bash: 2, view: 1 },
       usage: {
         calls: 0,
@@ -365,18 +365,18 @@ describe("summarizeSessionEvents", () => {
       jsonl([
         {
           type: "skill.invoked",
-          data: { name: "radius-app-bicep", pluginName: "radius" }
+          data: { name: "radius-app-model", pluginName: "radius" }
         },
         {
           type: "skill.invoked",
-          data: { name: "radius-app-bicep", pluginName: " " }
+          data: { name: "radius-app-model", pluginName: " " }
         }
       ])
     );
 
     expect(summary.skills).toEqual([
-      "radius:radius-app-bicep",
-      "radius-app-bicep"
+      "radius:radius-app-model",
+      "radius-app-model"
     ]);
   });
 

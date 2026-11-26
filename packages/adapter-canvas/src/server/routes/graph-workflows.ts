@@ -81,7 +81,7 @@ const MISSING_ENTRY_PAYLOAD = {
   error: "Canvas server state is unavailable."
 } as const;
 const GENERATING_APP_BICEP_MESSAGE =
-  "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.";
+  "Copilot is generating .radius/app.bicep with the radius-app-model skill.";
 
 // Reloading unchanged source never requests another attempt.
 function appModelAuthoringFailureDetail(
@@ -163,9 +163,8 @@ export interface GraphWorkflowDependencies<
     request: GraphRepairRequest
   ): GraphRepairAttempt;
   clearGraphRepairAttempt(entry: TEntry, view: GraphProgressView): void;
-  // Every path on a branch, used to answer the one prerequisite the app-bicep
-  // modeling skill enforces before it will model anything. Resolves empty when
-  // the tree cannot be read.
+  // Every path on a branch, used by the canvas's Dockerfile check before it
+  // hands off modeling. Resolves empty when the tree cannot be read.
   listBranchPaths(
     entry: TEntry,
     repo: string,
@@ -639,12 +638,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     }
   }
 
-  // The app-bicep modeling skill refuses outright — before writing anything —
-  // any repository without a Dockerfile, because it builds the application's
-  // own image from one. That refusal is delivered to the user in the Copilot
-  // conversation and never reaches this server, so handing off regardless would
-  // leave the page waiting for a file that is never going to be written.
-  // Answering here turns an unbounded wait into an actionable error.
+  // The canvas refuses a repository without a Dockerfile before it hands off
+  // modeling (core `evaluateAppSource`). This check is the canvas's own rule
+  // and is stricter than the radius-app-model skill, which models published
+  // images when there is no Dockerfile.
   async function branchRefusalReason(
     entry: TEntry,
     repo: string,
@@ -938,7 +935,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         addEvent(
           "creating_model",
           "running",
-          "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
+          "Copilot is creating .radius/app.bicep with the radius-app-model skill."
         );
         const outcome = await appBicepHandoffOutcome(
           entry,
@@ -1301,7 +1298,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         addEvent(
           "creating_model",
           "running",
-          "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
+          "Copilot is creating .radius/app.bicep with the radius-app-model skill."
         );
         const outcome = await appBicepHandoffOutcome(
           entry,
@@ -1676,7 +1673,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       delete state.diffModelingFailed;
 
       // Fetch the committed/persisted app.bicep on each branch. app.bicep
-      // generation is owned by the Radius app-bicep skill, so branches without
+      // generation is owned by the radius-app-model skill, so branches without
       // one simply contribute nothing to the diff (added/removed).
       addEvent(
         "checking_model",
@@ -1741,7 +1738,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         addEvent(
           "creating_model",
           "running",
-          "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
+          "Copilot is creating .radius/app.bicep with the radius-app-model skill."
         );
         // A permanent failure on EITHER side ends the diff's wait. Both sides
         // are missing to have reached here, and both models are produced by the

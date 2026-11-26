@@ -57,7 +57,7 @@ export async function resolveRecipeOutputs(
     // `Radius.*` types are supported, so a legacy `Applications.*` type is
     // refused before lookup, even if a pack still keys it, rather than being
     // silently resolved. Recipe resolution for custom/unlisted types is owned
-    // by recipe packs at deploy time and the radius-app-bicep skill — this
+    // by recipe packs at deploy time and the Radius modeling skills — this
     // modeling code no longer fabricates outputs when nothing matches.
     const matchingRecipe =
       baseType.toLowerCase().startsWith("radius.") ?

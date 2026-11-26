@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import os from "node:os";
-import { beginManagedRun } from "../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
+import { beginManagedRun } from "./app-model-staging.js";
 import {
   commitWorkspaceBranchResolution,
   resolveWorktreePath,

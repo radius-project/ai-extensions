@@ -341,7 +341,7 @@ describe("core package in a host without HTTP or DOM globals", () => {
 
     expect(typeof barrel.computeGraphDiff).toBe("function");
     expect(typeof graph.filterGraphVisualizationResources).toBe("function");
-    expect(typeof modeling.evaluateStagedRun).toBe("function");
+    expect(typeof modeling.isStagingDirName).toBe("function");
     expect(typeof platforms.buildOidcSubject).toBe("function");
     expect(typeof remediations.remediationView).toBe("function");
     expect(typeof commands.displayShellCommand).toBe("function");

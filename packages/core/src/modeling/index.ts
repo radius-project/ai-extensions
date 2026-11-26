@@ -13,53 +13,20 @@ export {
   freshnessIdentity,
   normalizeAppBicep,
   parseAppOrigin,
-  serializeAppOrigin
+  stagesBeforeDeploy
 } from "./app-origin.js";
 export type {
   AppModelFreshness,
   AppModelFreshnessInput,
   AppModelFreshnessStatus,
+  AppModelStage,
   AppOrigin
 } from "./app-origin.js";
 
 export {
-  CONCURRENT_EDIT_MESSAGE,
-  CUSTOM_TYPE_STAGED_FILES,
-  REPAIR_ATTEMPT_BUDGET,
-  REPAIR_COMPILE_LIMIT,
-  REPEATED_FAILURE_MESSAGE,
   REQUIRED_STAGED_FILES,
   STAGING_DIR_PREFIX,
-  STAGING_IGNORE_PATTERN,
-  STAGING_RUN_RECORD,
-  STAGING_SELF_IGNORE,
-  STAGING_SELF_IGNORE_FILE,
-  UNRECORDED_RUN_MESSAGE,
-  changedManagedFiles,
-  concurrentEditMessage,
-  evaluateRepairAttempt,
-  evaluateStagedRun,
-  fingerprintCompilerOutput,
-  isPublishableExtraArtifact,
-  isRepeatedFailure,
-  isStagingDirName,
-  nextRepairState,
-  parseRepairState,
-  publishableFiles,
-  repairBudgetSpentMessage,
-  requiredStagedFiles,
-  sanitizeRunId,
-  stagingDirName
-} from "./app-staging.js";
-export type {
-  ManagedFileHashes,
-  RepairDecision,
-  RepairState,
-  RepairVerdict,
-  StagedRunEvaluation,
-  StagedRunInput,
-  StagedRunRecord,
-  StagedRunStatus
+  isStagingDirName
 } from "./app-staging.js";
 
 export {

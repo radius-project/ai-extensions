@@ -2,7 +2,7 @@ import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { beginManagedRun } from "../../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
+import { beginManagedRun } from "../../../src/app-model-staging.js";
 import { modelingRunLastActivityAtMs } from "../../../src/workspace.js";
 import { GRAPH_APP_BICEP_MAX_WAIT_MS } from "../../../src/graph-progress-contract.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
@@ -34,7 +34,7 @@ describe("managed authoring retry with real staging activity", () => {
             stages.push(stage.stagingDir);
             return stage;
           };
-          deps.radiusAppBicepSkill = () =>
+          deps.radiusSkillHandoff = () =>
             JSON.stringify({
               nodeCommand: resolve("test", "node"),
               skillBase: resolve("test", "skill"),

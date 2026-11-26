@@ -165,8 +165,9 @@ jobs:
           mv rad_linux_amd64 rad
           echo "RADIUS_RAD_BINARY=$install_dir/rad" >> "$GITHUB_ENV"
 
-      - name: Resolve real generated Radius definitions
-        working-directory: packages/adapter-canvas
-        env:
-          RUN_LIVE_RADIUS_TYPE_DEFINITION_TESTS: "1"
-        run: pnpm exec vitest run test/integration/runtime/radius-type-definition.live.test.ts
+      # The modeling skills read each type's schema from the radius Bicep
+      # extension of the installed rad release.
+      - name: Read Radius types with the modeling skill
+        run: >-
+          node extensions/radius/skills/radius-app-model/scripts/types.mjs
+          Radius.Compute/containers Radius.Data/postgreSqlDatabases

@@ -3,6 +3,7 @@
 - **Author**: Karishma Chawla (@kachawla)
 - **Date**: 2026-08
 - **Tracks**: [radius-project/ai-extensions#97](https://github.com/radius-project/ai-extensions/issues/97), case 2.4
+- **Status**: The staged skills `radius-app-model`, `radius-app-plan`, and `radius-app-complete` replace `promote-app-model.mjs`. Each stage script's `begin`, `check`, and `abort` commands stage and publish the run with the same `.radius/.staging-*` layout. A run that the Canvas starts has the same layout, and the Canvas publishes it (see [Cleanup](#cleanup)).
 
 ## Current state
 
@@ -80,7 +81,7 @@ Refusing discards a model that took minutes to produce, which is a real cost. Th
 
 Starting a modeling run leaves existing `.radius/.staging-*` directories alone. A timestamp cannot tell whether another run has stopped. Publish and abort clean up their own staging, but an interrupted run or failed cleanup can leave files behind. Before removing a leftover directory, confirm that its run has stopped and preserve any `.published-backup` files needed to recover an interrupted publish.
 
-The staging implementation reserves `.staging-managed-*` for runtime-owned runs. The standalone script cannot create, promote or abort a directory in that namespace. A managed run's in-memory handle retains the original file fingerprints and directory identities; a record left on disk does not authorize promotion after a restart. This boundary does not protect against arbitrary shell writes or independently grant authority to compile or publish a recipe.
+The Canvas starts its runs in `.staging-managed-*` directories, with `"publish": false` in their `run.json`. A stage script's `check` validates such a run and writes its origin record, but does not publish it; only the Canvas runtime that started the run publishes it. A managed run's in-memory handle retains the original file fingerprints and directory identities; a record left on disk does not authorize promotion after a restart. This boundary does not protect against arbitrary shell writes or independently grant authority to publish a recipe.
 
 `.radius/.staging-*` is added to the repository's ignore rules, and during implementation this moved from the start of a run to the publish step. Writing it at the start meant a run that failed had to un-write it on every failure path — including the ones where the run record is gone and there is nothing left to say what to restore — so "a failed run leaves `.radius/` byte-identical" depended on a revert being correct everywhere. Writing it only on the path that already modifies `.radius/` means a failed run has nothing outside its staging directory to undo, and the guarantee holds by construction.
 

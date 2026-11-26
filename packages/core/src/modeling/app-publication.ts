@@ -1,23 +1,18 @@
 type WorkspacePath = string | null | undefined;
-type ArtifactPath = (
-  workspace: WorkspacePath,
-  input: unknown,
-  fallback: string | null
-) => string;
 
+// Publishes an authored Recipe file to the repository's registry. The
+// radius-app-plan skill writes the Recipe as `<name>-recipe.bicep`, and the
+// canvas publishes it because it holds the registry credentials. Publications
+// to one target run in order, so a later call cannot overtake an earlier one.
 export interface AppPublicationPorts {
-  resolveExisting: ArtifactPath;
-  resolveTarget: ArtifactPath;
-  stagingPrefix(workspace: WorkspacePath, input: unknown): string;
+  resolveExisting(
+    workspace: WorkspacePath,
+    input: unknown,
+    fallback: string | null
+  ): string;
   validateRegistryTarget(target: unknown, repo: WorkspacePath): string | null;
   isUnconfirmedExit(error: unknown): boolean;
-  localTargetKey(path: string): string;
   exists(path: string): boolean;
-  compileExtension(
-    fromFile: string,
-    target: string,
-    workspace: WorkspacePath
-  ): Promise<unknown>;
   publishRecipe(
     file: string,
     target: string,
@@ -61,8 +56,6 @@ export function createAppPublication(ports: AppPublicationPorts) {
     }
   }
 
-  const extensionKey = (target: string) =>
-    `extension:${ports.localTargetKey(target)}`;
   const recipeKey = (target: string) => {
     const reference = target.trim();
     const tag = reference.lastIndexOf(":");
@@ -80,33 +73,7 @@ export function createAppPublication(ports: AppPublicationPorts) {
       return blockedTargets.size === 0;
     },
     enqueue: publishInOrder,
-    extensionKey,
     recipeKey,
-    async compileExtension(
-      workspace: WorkspacePath,
-      input: {
-        stagingDir?: unknown;
-        manifestPath?: unknown;
-        targetPath?: unknown;
-      }
-    ) {
-      const prefix = ports.stagingPrefix(workspace, input.stagingDir);
-      const from = ports.resolveExisting(
-        workspace,
-        input.manifestPath,
-        `.radius/${prefix}custom-types.yaml`
-      );
-      const target = ports.resolveTarget(
-        workspace,
-        input.targetPath,
-        `.radius/${prefix}custom-types.tgz`
-      );
-      if (!ports.exists(from)) return { kind: "missing", path: from } as const;
-      await publishInOrder(extensionKey(target), () =>
-        ports.compileExtension(from, target, workspace)
-      );
-      return { kind: "compiled", target } as const;
-    },
     async publishRecipe(
       resolveWorkspace: () => Promise<{
         workspacePath?: WorkspacePath;

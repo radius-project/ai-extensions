@@ -26,7 +26,9 @@ Radius stores answer timestamps under `~/.copilot/radius/plugin-update-responses
 
 | Skill                 | Use it when you want to…                                                                                                      |
 |-----------------------|-------------------------------------------------------------------------------------------------------------------------------|
-| `radius-app-bicep`    | Generate or update the `.radius/app.bicep` manifest from a repo's contents.                                                   |
+| `radius-app-model`    | Model a repo as a platform-neutral Radius application graph in `.radius/app.bicep` (Stage 1).                                 |
+| `radius-app-plan`     | Plan that model for a cloud provider's Recipe pack, such as Azure (Stage 2).                                                  |
+| `radius-app-complete` | Add the settings, secrets, and credentials that make the model deployable (Stage 3).                                          |
 | `radius-app-graph`    | Build, refresh, or diff the Radius application graph.                                                                         |
 | `radius-environment`  | Create and verify an AWS/Azure deploy environment and its OIDC trust.                                                         |
 | `radius-deploy`       | Deploy (or troubleshoot) an app via the generated GitHub Actions workflow.                                                    |

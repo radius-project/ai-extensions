@@ -38,6 +38,12 @@ export interface DeploymentStartContext {
     resolve(target: Readonly<DeploymentTarget>): Promise<string | null>;
     isCurrent(): boolean;
   };
+  // Last check before the deployment starts, on the fully resolved and
+  // validated target. Answers a refusal, such as a model that is not ready to
+  // deploy, or undefined to deploy.
+  checkTarget?(
+    target: Readonly<DeploymentTarget>
+  ): Promise<{ status: 409 | 503; error: string } | undefined>;
 }
 
 export interface DeploymentRuntimePorts extends DeploymentOwnerPorts {
@@ -329,6 +335,27 @@ export function createDeploymentRuntime(ports: DeploymentRuntimePorts) {
             )
           };
         }
+      }
+      if (context.checkTarget) {
+        let refusal: { status: 409 | 503; error: string } | undefined;
+        try {
+          refusal = await context.checkTarget(Object.freeze({ ...target }));
+        } catch (error) {
+          refusal = {
+            status: 503,
+            error: ports.delivery.redactDiagnostic(
+              `Could not check the deployment target: ${error instanceof Error ? error.message : String(error)}`
+            )
+          };
+        }
+        if (refusal) return { ok: false, ...refusal };
+        if (!admissionCurrent())
+          return {
+            ok: false,
+            status: 409,
+            error:
+              "The deployment context changed while checking its target. Nothing was deployed."
+          };
       }
       const { appFile: _selectedAppFile, ...repeatTarget } = target;
       const repeatAppFile =

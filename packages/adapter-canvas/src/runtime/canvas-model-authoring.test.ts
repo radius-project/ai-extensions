@@ -32,25 +32,17 @@ async function fixture(workspacePath = WORKSPACE) {
     canvasInstanceId: "panel",
     appModelAttemptTokens: { "octo/app::main": TOKEN }
   });
-  const appFile = join(
-    workspacePath,
-    ".radius",
-    ".staging-managed-fixture",
-    "app.bicep"
-  );
+  const runDir = join(workspacePath, ".radius", ".staging-managed-fixture");
   const cancel = vi.fn();
   const promote = vi.fn(async () => ({
     published: ["app.bicep"],
     gitError: ""
   }));
   vi.mocked(deps.beginManagedModel).mockReturnValue({
-    stagingDir: join(appFile, ".."),
-    artifact: () => {
-      throw new Error("No publication artifact expected");
-    },
+    stagingDir: runDir,
     assertBaseline() {},
     cancel,
-    validate: (check) => check(appFile),
+    validate: (check) => check(runDir),
     promote
   });
   vi.mocked(deps.appModel.workspaceSourceRevision).mockResolvedValue(REVISION);
@@ -76,7 +68,7 @@ async function fixture(workspacePath = WORKSPACE) {
     authoring,
     begin,
     settled,
-    appFile,
+    runDir,
     promote,
     cancel
   };
@@ -112,25 +104,23 @@ describe("createCanvasModelAuthoring", () => {
       const h = await fixture(workspace);
       h.deps.process.runValidator = spawnRad;
       await mkdir(scripts, { recursive: true });
-      await mkdir(join(h.appFile, ".."), { recursive: true });
-      await writeFile(h.appFile, "fixture model");
+      await mkdir(h.runDir, { recursive: true });
       await writeFile(
-        join(scripts, "validate-bicep.mjs"),
-        `import { readFileSync, realpathSync } from "node:fs";
+        join(scripts, "model.mjs"),
+        `import { realpathSync } from "node:fs";
          import { join } from "node:path";
-         const [, , appFile, flag] = process.argv;
-         if (flag !== "--managed-final" ||
-             realpathSync(appFile) !== realpathSync(join(process.cwd(), ".radius", ".staging-managed-fixture", "app.bicep")) ||
-             readFileSync(appFile, "utf8") !== "fixture model") {
-           throw new Error("Unexpected validator inputs");
+         const [, , command, dir] = process.argv;
+         if (command !== "check" ||
+             realpathSync(dir) !== realpathSync(join(process.cwd(), ".radius", ".staging-managed-fixture"))) {
+           throw new Error("Unexpected check inputs");
          }
-         process.stderr.write("Fixture model rejected");
+         console.log("Resources:\\n  none\\nProblems:\\n  1. Fixture model rejected");
          process.exitCode = 1;`
       );
       h.begin(JSON.stringify({ nodeCommand: process.execPath, skillBase }));
 
       await expect(h.authoring.owner.finish(TOKEN)).rejects.toThrow(
-        "Radius model validation failed: Fixture model rejected"
+        "The Radius model check failed: Problems:\n  1. Fixture model rejected"
       );
       expect(h.promote).not.toHaveBeenCalled();
       expect(h.settled).toHaveBeenCalledExactlyOnceWith(false);
@@ -227,33 +217,30 @@ describe("createCanvasModelAuthoring", () => {
     }
   );
 
-  it("redacts, trims and bounds the validator's stderr and refuses promotion", async () => {
+  it("redacts, trims and bounds the check's output and refuses promotion", async () => {
     const h = await fixture();
     const diagnostic = `{"clientSecret":"fixture-value"} ${"x".repeat(4_000)}`;
     vi.mocked(h.deps.process.runValidator).mockRejectedValue(
       Object.assign(new Error("not the actionable diagnostic"), {
-        stderr: `  ${diagnostic}\n`
+        stdout: `  ${diagnostic}\n`,
+        stderr: "not the problems"
       })
     );
     h.begin();
 
-    const prefix = "Radius model validation failed: ";
+    const prefix = "The Radius model check failed: ";
     const expected = '{"clientSecret":"[REDACTED]"} ';
     await expect(h.authoring.owner.finish(TOKEN)).rejects.toThrow(
       new Error(prefix + expected + "x".repeat(4_000 - expected.length))
     );
     expect(h.deps.process.runValidator).toHaveBeenCalledExactlyOnceWith(
       NODE,
-      [
-        join(SKILL, "scripts", "validate-bicep.mjs"),
-        h.appFile,
-        "--managed-final"
-      ],
+      [join(SKILL, "scripts", "model.mjs"), "check", h.runDir],
       {
         cwd: WORKSPACE,
-        timeout: 120_000,
+        timeout: 300_000,
         signal: expect.any(AbortSignal),
-        label: "Radius model validator"
+        label: "Radius model check"
       }
     );
     expect(h.promote).not.toHaveBeenCalled();
@@ -265,16 +252,20 @@ describe("createCanvasModelAuthoring", () => {
       Object.assign(new Error("validator failed"), { stderr: "  \n" }),
       "validator failed"
     ],
+    [
+      Object.assign(new Error("validator failed"), { stderr: " no rad \n" }),
+      "no rad"
+    ],
     ["validator unavailable", "validator unavailable"]
   ])(
-    "falls back to the failure message when stderr is unavailable",
+    "falls back to stderr, then to the failure message, without check output",
     async (failure, message) => {
       const h = await fixture();
       vi.mocked(h.deps.process.runValidator).mockRejectedValue(failure);
       h.begin();
 
       await expect(h.authoring.owner.finish(TOKEN)).rejects.toThrow(
-        `Radius model validation failed: ${message}`
+        `The Radius model check failed: ${message}`
       );
       expect(h.promote).not.toHaveBeenCalled();
     }

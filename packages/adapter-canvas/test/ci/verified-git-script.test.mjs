@@ -186,7 +186,7 @@ async function completionApi({
     ["package.json", PACKAGE_BLOB],
     ["com.github.copilot/extensions/radius/extension.mjs", EXTENSION_BLOB],
     ["assets/preview.png", "4".repeat(40)],
-    ["skills/radius-app-bicep/SKILL.md", "5".repeat(40)],
+    ["skills/radius-app-model/SKILL.md", "5".repeat(40)],
     ["plugin.json", MANIFEST_BLOB],
     ["README.md", README_BLOB],
     ...(includeBundledExtension ?

@@ -25,9 +25,7 @@ import {
   buildGraphViaRad,
   runRadAppGraph,
   writeBicepCompileConfig,
-  runRadBicepPublishExtension,
   spawnRad,
-  bicepPublishExtensionArgs,
   bicepPublishArgs,
   saveGraphJson,
   normalizeSha256,
@@ -2371,10 +2369,20 @@ describe.skipIf(!LIVE_RAD)(
           ""
         ].join("\n");
         fs.writeFileSync(path.join(ws, "custom-types.yaml"), manifest);
-        await runRadBicepPublishExtension({
-          fromFile: path.join(ws, "custom-types.yaml"),
-          target: path.join(ws, "custom-types.tgz")
-        });
+        // The radius-app-model skill compiles custom-types.yaml the same way.
+        await spawnRad(
+          await ensureRadBinary(),
+          [
+            "bicep",
+            "publish-extension",
+            "--from-file",
+            path.join(ws, "custom-types.yaml"),
+            "--target",
+            path.join(ws, "custom-types.tgz"),
+            "--force"
+          ],
+          { cwd: ws, env: managedBicepEnv() }
+        );
         fs.writeFileSync(
           path.join(ws, "bicepconfig.json"),
           JSON.stringify({
@@ -2416,18 +2424,7 @@ describe.skipIf(!LIVE_RAD)(
   }
 );
 
-describe("bicep publish arg builders", () => {
-  it("builds publish-extension args with --force", () => {
-    expect(bicepPublishExtensionArgs("/a/from.yaml", "/a/out.tgz")).toEqual([
-      "bicep",
-      "publish-extension",
-      "--from-file",
-      "/a/from.yaml",
-      "--target",
-      "/a/out.tgz",
-      "--force"
-    ]);
-  });
+describe("bicep publish arg builder", () => {
   it("builds publish args (no --force, auth flows through env)", () => {
     expect(
       bicepPublishArgs("/a/recipe.bicep", "br:ghcr.io/acme/app/r:1.0.0")
@@ -2474,7 +2471,7 @@ describe("managed Bicep publishing", () => {
         "    process.exitCode = 7;",
         "  }",
         '  if (process.env.FAKE_RAD_PUBLISH_SCENARIO === "stdout") {',
-        '    process.stdout.write("BCP192: invalid manifest");',
+        '    process.stdout.write("BCP192: invalid module");',
         "    process.exitCode = 8;",
         "  }",
         '  if (process.env.FAKE_RAD_PUBLISH_SCENARIO === "silent") {',
@@ -2507,75 +2504,24 @@ describe("managed Bicep publishing", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it("publishes a local extension with resolved paths and the managed Bicep environment", async () => {
+  it("rechecks admission before the managed publish command spawns", async () => {
     vi.resetModules();
     const mod = await import("./rad.js");
     writeManagedBicepStub();
-    const fromFile = path.join(root, "types", "manifest.yaml");
-    const target = path.join(root, "artifacts", "custom-types.tgz");
-    fs.mkdirSync(path.dirname(fromFile), { recursive: true });
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(fromFile, "namespace: Radius.Resources");
 
     await expect(
-      mod.runRadBicepPublishExtension({
-        fromFile,
-        target,
-        timeout: 4321
+      mod.runRadBicepPublish({
+        file: path.join(root, "recipe.bicep"),
+        target: "br:registry.invalid/acme/recipe:v1",
+        beforeSpawn: () => {
+          throw new Error("request cancelled");
+        }
       })
-    ).resolves.toBe(path.resolve(target));
-
-    expect(JSON.parse(fs.readFileSync(invocation, "utf8"))).toEqual({
-      argv: [
-        path.join(path.dirname(path.resolve(target)), "bicep"),
-        "publish-extension",
-        "--from-file",
-        path.resolve(fromFile),
-        "--target",
-        path.resolve(target),
-        "--force"
-      ],
-      cwd: path.dirname(path.resolve(target)),
-      bicep: mod.MANAGED_BICEP_PATH
-    });
-  });
-
-  it("rechecks admission before either managed publish command spawns", async () => {
-    vi.resetModules();
-    const mod = await import("./rad.js");
-    writeManagedBicepStub();
-    let prepared = 0;
-    const prepareSpawn = async () => {
-      await Promise.resolve();
-      prepared++;
-    };
-    const beforeSpawn = () => {
-      if (prepared) throw new Error("request cancelled after preparation");
-    };
-    const compilation = mod.runRadBicepPublishExtension({
-      fromFile: path.join(root, "manifest.yaml"),
-      target: path.join(root, "extension.tgz"),
-      prepareSpawn,
-      beforeSpawn
-    });
-    const publication = mod.runRadBicepPublish({
-      file: path.join(root, "recipe.bicep"),
-      target: "br:registry.invalid/acme/recipe:v1",
-      prepareSpawn,
-      beforeSpawn
-    });
-
-    for (const result of await Promise.allSettled([compilation, publication])) {
-      expect(result).toMatchObject({
-        status: "rejected",
-        reason: { message: expect.stringContaining("request cancelled") }
-      });
-    }
-    expect(prepared).toBe(2);
+    ).rejects.toThrow("request cancelled");
     expect(fs.existsSync(invocation)).toBe(false);
   });
 
-  it("preserves the unconfirmed-exit warning and cause through both publish wrappers", async () => {
+  it("preserves the unconfirmed-exit warning and cause through the publish wrapper", async () => {
     vi.resetModules();
     const mod = await import("./rad.js");
     const { isRadProcessExitUnconfirmed } = await import("./index.js");
@@ -2585,35 +2531,22 @@ describe("managed Bicep publishing", () => {
       "",
       "partial compiler output"
     );
-    const beforeSpawn = () => {
-      throw unconfirmed;
-    };
 
-    const outcomes = await Promise.allSettled([
-      mod.runRadBicepPublishExtension({
-        fromFile: path.join(root, "manifest.yaml"),
-        target: path.join(root, "extension.tgz"),
-        beforeSpawn
-      }),
-      mod.runRadBicepPublish({
+    const error: unknown = await mod
+      .runRadBicepPublish({
         file: path.join(root, "recipe.bicep"),
         target: "br:registry.invalid/acme/recipe:v1",
-        beforeSpawn
-      })
-    ]);
-
-    for (const outcome of outcomes) {
-      expect(outcome).toMatchObject({
-        status: "rejected",
-        reason: {
-          message: expect.stringContaining("do not use the affected target"),
-          cause: unconfirmed
+        beforeSpawn: () => {
+          throw unconfirmed;
         }
-      });
-      if (outcome.status === "rejected") {
-        expect(isRadProcessExitUnconfirmed(outcome.reason)).toBe(true);
-      }
-    }
+      })
+      .catch((reason: unknown) => reason);
+
+    expect(error).toMatchObject({
+      message: expect.stringContaining("do not use the affected target"),
+      cause: unconfirmed
+    });
+    expect(isRadProcessExitUnconfirmed(error)).toBe(true);
   });
 
   it("publishes a Bicep module with caller authentication isolated in the child environment", async () => {
@@ -2650,13 +2583,13 @@ describe("managed Bicep publishing", () => {
 
   it.each([
     [
-      "publish-extension",
+      "publish",
       "stdout",
-      "BCP192: invalid manifest",
+      "BCP192: invalid module",
       async (mod: typeof import("./rad.js")) =>
-        mod.runRadBicepPublishExtension({
-          fromFile: path.join(root, "manifest.yaml"),
-          target: path.join(root, "extension.tgz")
+        mod.runRadBicepPublish({
+          file: path.join(root, "recipe.bicep"),
+          target: "br:registry.invalid/acme/recipe:v1"
         })
     ],
     [

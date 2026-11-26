@@ -149,7 +149,8 @@ import {
 } from "./server/services/aws-setup-rollback.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
-import { resolveGeneratorVersion } from "./generator-version.js";
+import { resolvePluginVersion } from "./plugin-version.js";
+import { radiusSkillHandoff } from "./skill.js";
 import {
   createEnvironmentProviderReader,
   createEnvironmentTargetReader
@@ -1168,7 +1169,7 @@ async function ensureWorkflowsCurrent(
 
 // no access to the SDK `session`, so when a graph/generate route finds no
 // app.bicep it delegates through this hook, which injects a user turn asking the
-// agent to run the radius-app-bicep skill. This is what makes branch/repo
+// agent to run the radius-app-model skill. This is what makes branch/repo
 // selection (not just canvas open) trigger generation automatically.
 let appBicepHandoff: AppBicepHandoff | null = null;
 export function setAppBicepHandoff(fn: AppBicepHandoff | null): void {
@@ -5651,7 +5652,7 @@ export function createProductionCanvasServerRuntime(
       latestAny: () => operations.latestAny(),
       get: (operationId) => operations.get(operationId),
       toClientView: (record: any) => toClientView(record, { awsEnabled }),
-      productVersion: resolveGeneratorVersion,
+      productVersion: resolvePluginVersion,
       now: () => Date.now()
     },
     {
@@ -6617,7 +6618,12 @@ export function createProductionCanvasServerRuntime(
     readDeploymentDefaults: deploymentViews.defaults,
     reportError: (error) =>
       console.error(redactGhCredentials(errorMessage(error))),
-    errorMessage
+    errorMessage,
+    skillHandoff: radiusSkillHandoff,
+    sendHandoff: async (message) => {
+      const result = await invokeSessionPrompt(sessionPromptHandler, message);
+      if (result.error) throw new Error(result.error);
+    }
   });
 
   const abandonment = createDeploymentAbandonmentService({

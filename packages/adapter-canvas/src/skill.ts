@@ -1,10 +1,11 @@
-// Compact bootstrap for the radius-app-bicep skill packaged with the Canvas.
+// Compact bootstrap for the Radius modeling skills packaged with the Canvas:
+// radius-app-model (Stage 1), radius-app-plan (Stage 2), and
+// radius-app-complete (Stage 3).
 
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveGeneratorVersion } from "./generator-version.js";
 import {
   defaultNodeExecutable,
   MINIMUM_NODE_MAJOR,
@@ -12,49 +13,42 @@ import {
 } from "./node-executable.js";
 import { resolvePluginRoot } from "./plugin-root.js";
 
-const REQUIRED_SKILL_FILES = [
-  "SKILL.md",
-  path.join("scripts", "validate-bicep.mjs"),
-  path.join("scripts", "bicep-security-rules.mjs"),
-  path.join("references", "source-code-references.md")
-];
+export type RadiusModelingSkill =
+  "radius-app-model" | "radius-app-plan" | "radius-app-complete";
+
+// The files a skill directory must have to be usable: its instructions and the
+// scripts its workflow runs.
+const REQUIRED_SKILL_FILES = {
+  "radius-app-model": ["SKILL.md", "scripts/model.mjs", "scripts/common.mjs"],
+  "radius-app-plan": ["SKILL.md", "scripts/plan.mjs", "scripts/common.mjs"],
+  "radius-app-complete": [
+    "SKILL.md",
+    "scripts/complete.mjs",
+    "scripts/common.mjs"
+  ]
+} satisfies Record<RadiusModelingSkill, readonly string[]>;
 const SKILL_INSTRUCTION =
-  "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase for <loaded-skill-base>. Substitute nodeCommand for <loaded-node>. Substitute skillVersion for <loaded-skill-version> only when skillVersion is present; otherwise leave <loaded-skill-version> unchanged so the skill omits the flag.";
+  "Continue with the loaded skill. If it is not loaded, read SKILL.md from skillBase. Use skillBase as <skill-dir>, and run the skill's scripts with nodeCommand instead of node. Put nodeCommand and each script path in double quotes, because either can contain spaces, such as C:\\Program Files\\nodejs\\node.exe. In PowerShell, start the command with &.";
 // Returned instead of the handoff when the machine has no Node.js interpreter
 // the scripts can run. The run cannot start, and the only permitted next step
 // is to ask the user — never to download or install a runtime on their behalf.
 const MISSING_NODE_INSTRUCTION = `Do not start the modeling run: the skill's scripts need Node.js ${MINIMUM_NODE_MAJOR} or newer and the Radius extension found none on this machine. Never download, install, unpack, or otherwise obtain a Node.js runtime, and never run the scripts through another runtime. Report this to the user, ask them to install Node.js ${MINIMUM_NODE_MAJOR} or newer (or to make their existing installation visible to the Copilot app), and stop. Only a fresh user request may start another run.`;
 
-export interface RadiusAppBicepSkillDependencies {
+export interface RadiusSkillDependencies {
   moduleDir: string;
   homeDir: string;
   pathExists(filePath: string): boolean;
-  generatorVersion(): string;
   // Where the skill scripts run: an existing Node.js interpreter new enough for
   // them, or none. They are never invoked as a bare `node`, because the Copilot
   // app's own runtime is not on the agent's PATH.
   nodeExecutable(): NodeResolution;
 }
 
-interface RadiusAppBicepHandoff {
-  skill: "radius-app-bicep";
-  repoPath: string;
-  skillBase: string;
-  skillVersion?: string;
-  nodeCommand: string;
-  instruction: string;
-  brief?: string;
-}
-
-interface RadiusAppBicepNodeMissing {
-  skill: "radius-app-bicep";
-  repoPath: string;
-  nodeCommand: null;
-  // What was found and refused, so the report names the user's actual
-  // installation instead of claiming the machine has no Node.js at all.
-  rejectedRuntimes?: readonly string[];
-  instruction: string;
-}
+export type RadiusSkillHandoff = (
+  skill: RadiusModelingSkill,
+  repoPath?: string,
+  brief?: string
+) => string;
 
 function describeRejected(
   resolution: NodeResolution
@@ -81,17 +75,16 @@ function sanitizeRepoPath(repoPath: unknown): string {
   return cleaned || FALLBACK;
 }
 
+// Where a skill can be, in probe order: the installed plugin bundle, the
+// repository source for a development run, and the reinstalled plugin.
 function skillBaseCandidates(
   moduleDir: string,
-  homeDir: string
+  homeDir: string,
+  skill: RadiusModelingSkill
 ): readonly string[] {
-  const pluginRoot = resolvePluginRoot(moduleDir);
   return [
-    path.join(pluginRoot, "skills", "radius-app-bicep"),
-    path.resolve(
-      moduleDir,
-      "../../../extensions/radius/skills/radius-app-bicep"
-    ),
+    path.join(resolvePluginRoot(moduleDir), "skills", skill),
+    path.resolve(moduleDir, "../../../extensions/radius/skills", skill),
     path.join(
       homeDir,
       ".copilot",
@@ -99,73 +92,69 @@ function skillBaseCandidates(
       "radius-plugins",
       "radius",
       "skills",
-      "radius-app-bicep"
+      skill
     )
   ];
 }
 
-export function createRadiusAppBicepSkill(
-  dependencies: RadiusAppBicepSkillDependencies
-): (repoPath?: string, brief?: string) => string {
-  const candidates = skillBaseCandidates(
-    dependencies.moduleDir,
-    dependencies.homeDir
-  );
-
-  return (repoPath?: string, brief?: string): string => {
+// Returns the JSON handoff that starts a modeling skill: where the skill is,
+// which Node.js runs its scripts, and how to continue. Throws when no complete
+// copy of the skill is installed.
+export function createRadiusSkillHandoff(
+  dependencies: RadiusSkillDependencies
+): RadiusSkillHandoff {
+  return (skill, repoPath, brief) => {
     const resolution = dependencies.nodeExecutable();
     const nodeCommand = resolution.executable;
     if (!nodeCommand) {
       const rejectedRuntimes = describeRejected(resolution);
-      const missing: RadiusAppBicepNodeMissing = {
-        skill: "radius-app-bicep",
+      return JSON.stringify({
+        skill,
         repoPath: sanitizeRepoPath(repoPath),
         nodeCommand: null,
+        // What was found and refused, so the report names the user's actual
+        // installation instead of claiming the machine has no Node.js at all.
         ...(rejectedRuntimes ? { rejectedRuntimes } : {}),
         instruction: MISSING_NODE_INSTRUCTION
-      };
-      return JSON.stringify(missing);
+      });
     }
+    const candidates = skillBaseCandidates(
+      dependencies.moduleDir,
+      dependencies.homeDir,
+      skill
+    );
+    const required = REQUIRED_SKILL_FILES[skill];
     const skillBase = candidates.find((candidate) =>
-      REQUIRED_SKILL_FILES.every((requiredFile) =>
-        dependencies.pathExists(path.join(candidate, requiredFile))
+      required.every((file) =>
+        dependencies.pathExists(path.join(candidate, file))
       )
     );
     if (!skillBase) {
       throw new Error(
         [
-          "Unable to locate a usable radius-app-bicep skill.",
+          `Unable to locate a usable ${skill} skill.`,
           "Checked candidates:",
           ...candidates.map((candidate) => `- ${candidate}`),
           "Each candidate must include:",
-          ...REQUIRED_SKILL_FILES.map((requiredFile) => `- ${requiredFile}`),
+          ...required.map((file) => `- ${file}`),
           "Repair the Radius plugin installation or run the extension from its source checkout."
         ].join("\n")
       );
     }
-
-    const skillVersion = dependencies.generatorVersion().trim();
-    const handoff: RadiusAppBicepHandoff = {
-      skill: "radius-app-bicep",
+    return JSON.stringify({
+      skill,
       repoPath: sanitizeRepoPath(repoPath),
       skillBase,
-      ...(skillVersion ? { skillVersion } : {}),
       nodeCommand,
       instruction: SKILL_INSTRUCTION,
       ...(brief ? { brief } : {})
-    };
-    return JSON.stringify(handoff);
+    });
   };
 }
 
-const defaultRadiusAppBicepSkill = createRadiusAppBicepSkill({
+export const radiusSkillHandoff: RadiusSkillHandoff = createRadiusSkillHandoff({
   moduleDir: path.dirname(fileURLToPath(import.meta.url)),
   homeDir: homedir(),
   pathExists: existsSync,
-  generatorVersion: resolveGeneratorVersion,
   nodeExecutable: defaultNodeExecutable
 });
-
-export function radiusAppBicepSkill(repoPath?: string, brief?: string): string {
-  return defaultRadiusAppBicepSkill(repoPath, brief);
-}

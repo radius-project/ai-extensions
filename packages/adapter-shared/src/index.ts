@@ -26,7 +26,6 @@ export {
   spawnRad,
   killChildTree,
   runRadAppGraph,
-  runRadBicepPublishExtension,
   runRadBicepPublish,
   buildGraphViaRad
 } from "./rad.js";
@@ -43,7 +42,6 @@ export type {
   RunRadAppGraphOptions,
   ResolveRadiusExtensionRefOptions,
   BuildGraphViaRadOptions,
-  RunRadBicepPublishExtensionOptions,
   RunRadBicepPublishOptions
 } from "./rad.js";
 export {

@@ -170,7 +170,7 @@ const EXPECTED_FUNCTIONS = [
   "freshnessIdentity",
   "normalizeAppBicep",
   "parseAppOrigin",
-  "serializeAppOrigin",
+  "stagesBeforeDeploy",
   "evaluateAppSource",
   "ambiguousAppSourceBrief",
   "dockerfileDirectories",
@@ -287,9 +287,8 @@ const EXPECTED_VALUES = [
   "UNSUPPORTED_NO_DOCKERFILE_MESSAGE",
   "UNIDENTIFIED_APPLICATION_MESSAGE",
   "WORKSPACE_MANIFEST_FILES",
-  // The staging rules are core's specification for the bundled promote script
-  // and are reached through the modeling barrel; only the directory prefix is
-  // public, because publish-targets.ts confines tool paths against it.
+  // The staging prefix is public because the skills' scripts and the canvas
+  // must agree on it.
   "STAGING_DIR_PREFIX",
   "KUBERNETES_NAMESPACE_ERROR",
   "KUBERNETES_NAMESPACE_PATTERN",
@@ -345,10 +344,6 @@ const MODULE_INTERNAL_NAMES = [
   "deriveConcreteResource",
   "parseRecipePack",
   "findDockerfiles",
-  "evaluateStagedRun",
-  "publishableFiles",
-  "requiredStagedFiles",
-  "isPublishableExtraArtifact",
   "isDockerfilePath",
   "isIgnoredSourcePath",
   "defaultDeployTemplateVars",

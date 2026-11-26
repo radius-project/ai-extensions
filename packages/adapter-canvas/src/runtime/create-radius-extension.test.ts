@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { serializeAppOrigin } from "@radius-project/core";
 import { createDeferred } from "../../test/support/browser/fakes.js";
 import { hashAppBicep } from "../app-bicep-hash.js";
 import {
@@ -9,6 +8,7 @@ import {
   KEEPALIVE_ACTIVE_WINDOW_MS
 } from "./create-radius-extension.js";
 import { sourceEditorInstanceId } from "./canvas-lifecycle.js";
+import { MANAGED_RUN_INSTRUCTION } from "./canvas-model-authoring.js";
 import {
   createFakeDependencies,
   createFakeSession,
@@ -413,7 +413,7 @@ describe("RU-19: onSessionStart hook", () => {
     expect(result).toBeUndefined();
     expect(session.send).not.toHaveBeenCalled();
     expect(session.rpc.canvas.open).not.toHaveBeenCalled();
-    expect(fake.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+    expect(fake.deps.radiusSkillHandoff).not.toHaveBeenCalled();
     expect(fake.deps.graphSources.read).not.toHaveBeenCalled();
   });
 
@@ -540,11 +540,12 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
     // The Canvas embeds the skill bootstrap, so the agent never has to find
     // and call radius_generate_app to start modeling.
     const skillHandoff = JSON.stringify({
-      ...JSON.parse(deps.radiusAppBicepSkill()),
+      ...JSON.parse(deps.radiusSkillHandoff("radius-app-model")),
       repoPath: "/workspace",
       managedAuthoring: {
         requestToken: attemptToken,
-        stagingDir: "/workspace/.radius/.staging-managed-test"
+        stagingDir: "/workspace/.radius/.staging-managed-test",
+        instruction: MANAGED_RUN_INSTRUCTION
       }
     });
     // The agent half must carry the full instructions...
@@ -637,10 +638,9 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
       sourceChangedSince: true
     });
     fake.deps.appModel.fetchWorkspaceFile = async () =>
-      serializeAppOrigin({
+      JSON.stringify({
         generatedAt: "2026-08-11T05:32:32.000Z",
         sourceCommit: String(commit).padStart(40, "0"),
-        skillVersion: "0.1.0-test",
         radiusVersion: "0.60",
         appBicepHash: hashAppBicep("resource db {}")
       });
@@ -737,7 +737,7 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
       .calls[0][0] as { prompt: string; displayPrompt: string };
     expect(sent.prompt).toContain("BCP037");
     expect(sent.prompt).toContain("attempt-A");
-    expect(sent.prompt).toContain("Repair `models/custom.bicep` in place");
+    expect(sent.prompt).toContain("repair `models/custom.bicep` in place");
     expect(sent.prompt).not.toContain(".radius/app.bicep");
     expect(sent.displayPrompt).toBe(
       deployRepairHandoffDisplayPrompt("acme/widgets", "main")

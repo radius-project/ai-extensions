@@ -2153,6 +2153,21 @@ test.describe("Radius Canvas in Chromium", () => {
                   .size
               })
         },
+        // The Deploy button reads the origin record of a .radius/app.bicep
+        // model before it deploys. With no record, it deploys as before.
+        ...(launch === "managed" ?
+          [
+            {
+              tool: "gh",
+              args: [
+                "api",
+                `/repos/${REPOSITORY}/contents/.radius/app.origin.json?ref=${WORKTREE_BRANCH}`
+              ],
+              exitCode: 1,
+              stderr: "gh: Not Found (HTTP 404)"
+            } satisfies FakeCliCommand
+          ]
+        : []),
         command(["api", "user", "--jq", ".login"], "acting-user\n"),
         command(
           [

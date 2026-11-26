@@ -76,7 +76,9 @@ describe(".github/extension release assets", () => {
 
   it("routes all owning skills to the same reviewed failure-report flow", () => {
     const skills = [
-      "radius-app-bicep",
+      "radius-app-model",
+      "radius-app-plan",
+      "radius-app-complete",
       "radius-app-graph",
       "radius-deploy",
       "radius-environment",

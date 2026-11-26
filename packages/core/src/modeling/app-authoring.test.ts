@@ -38,7 +38,6 @@ const freshness: AppModelFreshness = {
   origin: {
     generatedAt: "",
     sourceCommit: "commit",
-    skillVersion: "",
     radiusVersion: "",
     appBicepHash: "matching"
   }
@@ -142,7 +141,6 @@ describe("model evidence", () => {
       headCommit: vi.fn(async () => "c".repeat(40)),
       sourceChangedSince: vi.fn(async (_commit: string) => false),
       modelRecoverable: vi.fn(async (): Promise<boolean | undefined> => false),
-      generatorVersion: () => "",
       radiusVersion: vi.fn(async () => "0.61"),
       hashAppBicep: () => recordedOrigin.appBicepHash
     };

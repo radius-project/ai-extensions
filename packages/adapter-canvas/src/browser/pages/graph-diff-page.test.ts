@@ -761,7 +761,7 @@ describe("initializeGraphDiffPage", () => {
 
     expect(setError).toHaveBeenCalledWith(
       "graph-container",
-      "The Radius app-bicep skill cannot model this repository."
+      "Radius cannot model this repository."
     );
     expect(status.style.display).toBe("none");
   });

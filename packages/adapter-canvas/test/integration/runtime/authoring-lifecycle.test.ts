@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { APP_ORIGIN_REPO_PATH, serializeAppOrigin } from "@radius-project/core";
+import { APP_ORIGIN_REPO_PATH } from "@radius-project/core";
 import { describe, expect, it, vi } from "vitest";
 import { hashAppBicep } from "../../../src/app-bicep-hash.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
@@ -24,14 +24,13 @@ async function setup(refresh: boolean) {
         {
           bicepByRepoBranch: { [`workspace:${REPO}@main`]: MODEL },
           filesByRepoBranch: {
-            [`workspace:${REPO}@main:${APP_ORIGIN_REPO_PATH}`]:
-              serializeAppOrigin({
-                generatedAt: "2026-08-11T05:32:32.000Z",
-                sourceCommit: "a".repeat(40),
-                skillVersion: "0.1.0-test",
-                radiusVersion: "0.60",
-                appBicepHash: hashAppBicep(MODEL)
-              })
+            [`workspace:${REPO}@main:${APP_ORIGIN_REPO_PATH}`]: JSON.stringify({
+              generatedAt: "2026-08-11T05:32:32.000Z",
+              sourceCommit: "a".repeat(40),
+              radiusVersion: "0.60",
+              appBicepHash: hashAppBicep(MODEL),
+              stage: "model"
+            })
           },
           headCommits: { "workspace:/workspace": "b".repeat(40) },
           sourceChangedSince: true
@@ -40,9 +39,9 @@ async function setup(refresh: boolean) {
     },
     (deps) => {
       deps.appModel.workspaceSourceRevision = async () => "workspace:saved";
-      deps.radiusAppBicepSkill = () =>
+      deps.radiusSkillHandoff = () =>
         JSON.stringify({
-          skill: "radius-app-bicep",
+          skill: "radius-app-model",
           skillBase: resolve("fixture-skill"),
           nodeCommand: nodeAvailable ? resolve("fixture-node") : null,
           instruction:
@@ -53,7 +52,7 @@ async function setup(refresh: boolean) {
         ...begin(worktree),
         stagingDir: stage,
         cancel: cancelStage,
-        validate: (check) => check(resolve(stage, "app.bicep")),
+        validate: (check) => check(stage),
         promote
       });
     }

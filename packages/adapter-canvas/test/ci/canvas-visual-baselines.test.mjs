@@ -107,7 +107,9 @@ describe("affectsCanvasVisuals", () => {
     [".github/workflows/canvas-functional.yml"],
     ["tsconfig.json"],
     ["extensions/radius/package.json"],
-    ["extensions/radius/skills/radius-app-bicep/SKILL.md"]
+    ["extensions/radius/skills/radius-app-model/SKILL.md"],
+    ["extensions/radius/skills/radius-app-plan/scripts/plan.mjs"],
+    ["extensions/radius/skills/radius-app-complete/references/wiring.md"]
   ])("runs the suite when %s changes", (path) => {
     expect(affectsCanvasVisuals(["README.md", path])).toBe(true);
   });

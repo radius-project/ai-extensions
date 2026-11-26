@@ -11,8 +11,6 @@ import {
   unsupportedAppSourceReport
 } from "@radius-project/core";
 import { isRadProcessExitUnconfirmed } from "@radius-project/adapter-shared";
-import { join } from "node:path";
-import { isPublishableExtraArtifact } from "../../../../extensions/radius/skills/radius-app-bicep/scripts/app-model-staging.mjs";
 import { errorMessage, optionalString } from "./util.js";
 import {
   createGraphContextHelpers,
@@ -79,30 +77,11 @@ export function createRadiusTools(
     }
   }
 
-  function managedToken(args: ToolArgs): string | undefined {
-    if (args.requestToken === undefined) return undefined;
-    if (typeof args.requestToken !== "string" || !args.requestToken.trim()) {
-      throw new Error("A valid Radius authoring request token is required.");
-    }
-    return args.requestToken;
-  }
-
   const publication = createAppPublication({
     resolveExisting: deps.publishTargets.resolveExistingRadiusArtifact,
-    resolveTarget: deps.publishTargets.resolveRadiusArtifactTarget,
-    stagingPrefix: deps.publishTargets.resolveStagingDirPrefix,
     validateRegistryTarget: deps.publishTargets.validateGhcrTargetForRepo,
     isUnconfirmedExit: isRadProcessExitUnconfirmed,
-    localTargetKey: (target) =>
-      process.platform === "win32" ? target.toLowerCase() : target,
     exists: deps.process.existsSync,
-    compileExtension: (fromFile, target, workspace) =>
-      deps.rad.runRadBicepPublishExtension({
-        fromFile,
-        target,
-        log: logToSession,
-        beforeSpawn: () => authoring.assertStandalone(workspace)
-      }),
     publishRecipe: (file, target, workspace) =>
       deps.withGhcrDockerConfig((env) => {
         authoring.assertStandalone(workspace);
@@ -132,8 +111,9 @@ export function createRadiusTools(
     {
       ...declarationByName.get("radius_generate_app")!,
       // Two source checks gate the authoring handoff, and they differ in
-      // kind. A repository with no Dockerfile is refused outright (2.1): the
-      // product cannot model it, so the skill is withheld entirely. A repository
+      // kind. A repository with no Dockerfile is refused outright (2.1), so the
+      // skill is withheld entirely; this is the canvas's rule, stricter than the
+      // radius-app-model skill, which models published images. A repository
       // with SEVERAL Dockerfiles is not refused at all (2.2) — it is the normal
       // shape of a microservices application and must still be modeled as one
       // application — so the bootstrap is returned as usual, with a brief field
@@ -183,7 +163,7 @@ export function createRadiusTools(
           brief = authoring.brief;
         }
         if (targetsWorkspace) announceModelingRun(state);
-        return deps.radiusAppBicepSkill(repoPath, brief);
+        return deps.radiusSkillHandoff("radius-app-model", repoPath, brief);
       }
     },
     {
@@ -259,7 +239,9 @@ export function createRadiusTools(
           error: failure,
           ...(sourceRevision ? { sourceRevision } : {}),
           ...(entry.state.appModelAttemptEnvironments?.[target] !== undefined ?
-            { environmentKey: entry.state.appModelAttemptEnvironments[target] }
+            {
+              environmentKey: entry.state.appModelAttemptEnvironments[target]
+            }
           : {})
         };
         authoring.retire(attemptToken);
@@ -331,8 +313,8 @@ export function createRadiusTools(
       ...declarationByName.get("radius_complete_app_authoring")!,
       handler: async (args: ToolArgs) => {
         try {
-          const token = managedToken(args);
-          if (!token)
+          const token = args.requestToken;
+          if (typeof token !== "string" || !token.trim())
             throw new Error("A Radius authoring request token is required.");
           if (args.outcome === "cancel") {
             if (!authoring.cancel(token))
@@ -349,121 +331,17 @@ export function createRadiusTools(
       }
     },
     {
-      ...declarationByName.get("radius_publish_custom_type_extension")!,
-      // Modeling now writes its whole run into `.radius/.staging-<runId>/` and
-      // publishes it only once it is complete, so the custom-type package this
-      // tool produces has to land there with the rest of the run rather than in
-      // `.radius/` where the product reads it. `stagingDir` moves the defaults
-      // into that directory; path confinement is unchanged, and the staging
-      // directory is itself confined to a `.staging-*` child of `.radius/`.
-      handler: async (args: ToolArgs) => {
-        try {
-          const token = managedToken(args);
-          if (token) {
-            if (
-              args.stagingDir !== undefined ||
-              args.manifestPath !== undefined ||
-              args.targetPath !== undefined
-            )
-              throw new Error(
-                "Managed compilation takes a request token only; the staging paths are fixed."
-              );
-            return await authoring.publish(
-              token,
-              (_, stagingDir) =>
-                publication.extensionKey(join(stagingDir, "custom-types.tgz")),
-              publication.enqueue,
-              async (staging, _, guards) => {
-                const fromFile = staging.artifact("custom-types.yaml", true);
-                const target = staging.artifact("custom-types.tgz", false);
-                await deps.rad.runRadBicepPublishExtension({
-                  fromFile,
-                  target,
-                  log: logToSession,
-                  prepareSpawn: guards.prepareSpawn,
-                  beforeSpawn() {
-                    guards.beforeSpawn();
-                    staging.artifact("custom-types.yaml", true);
-                    staging.artifact("custom-types.tgz", false);
-                  }
-                });
-                return `Published custom-type extension to ${target}. Reference it from the staged bicepconfig.json.`;
-              }
-            );
-          }
-          const { workspacePath } = await workspaceState();
-          authoring.assertStandalone(workspacePath);
-          const result = await publication.compileExtension(
-            workspacePath,
-            args
-          );
-          if (result.kind === "missing") {
-            return `Resource-type manifest not found at ${result.path}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
-          }
-          return `Published custom-type extension to ${result.target}. Reference it from .radius/bicepconfig.json and recompile the app graph through the Radius canvas.`;
-        } catch (err) {
-          return `⚠️ Could not publish the custom-type extension: ${errorMessage(err)}`;
-        }
-      }
-    },
-    {
       ...declarationByName.get("radius_publish_recipe")!,
       handler: async (args: ToolArgs) => {
         try {
-          const token = managedToken(args);
-          const recipe = token ? optionalString(args.file) : "";
-          const target = token ? String(args.target ?? "").trim() : "";
-          if (
-            token &&
-            (recipe === "custom-recipe-pack.bicep" ||
-              !isPublishableExtraArtifact(recipe))
-          ) {
-            throw new Error(
-              "Managed publication requires a staged recipe filename, not a path."
-            );
-          }
-          const result =
-            token ?
-              await authoring.publish(
-                token,
-                (source) => {
-                  const error = deps.publishTargets.validateGhcrTargetForRepo(
-                    args.target,
-                    source.repo
-                  );
-                  if (error) throw new Error(error);
-                  return publication.recipeKey(target);
-                },
-                publication.enqueue,
-                async (staging, _, guards) => {
-                  const published = await deps.withGhcrDockerConfig((env) => {
-                    guards.assertCurrent();
-                    return deps.rad.runRadBicepPublish({
-                      file: staging.artifact(recipe, true),
-                      target,
-                      env,
-                      log: logToSession,
-                      prepareSpawn: guards.prepareSpawn,
-                      beforeSpawn() {
-                        guards.beforeSpawn();
-                        staging.artifact(recipe, true);
-                      }
-                    });
-                  });
-                  return {
-                    kind: "published",
-                    reference: String(published)
-                  } as const;
-                }
-              )
-            : await publication.publishRecipe(async () => {
-                const state = await workspaceState();
-                authoring.assertStandalone(state.workspacePath);
-                return state;
-              }, args);
+          const result = await publication.publishRecipe(async () => {
+            const state = await workspaceState();
+            authoring.assertStandalone(state.workspacePath);
+            return state;
+          }, args);
           if (result.kind === "refused") return result.error;
           if (result.kind === "missing") {
-            return `Recipe file not found at ${result.path}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
+            return `Recipe file not found at ${result.path}. The radius-app-plan skill writes it as .radius/<name>-recipe.bicep when it publishes the plan.`;
           }
           return `Published recipe to ${result.reference}. Reference it from the recipe pack (Radius.Core/recipePacks) for the custom type.`;
         } catch (err) {

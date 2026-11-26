@@ -469,7 +469,7 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
       event: "done",
       data: {
         error:
-          "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.",
+          "Copilot is generating .radius/app.bicep with the radius-app-model skill.",
         needsAppBicep: true,
         repo: "octo/app",
         branch: "feature/x"

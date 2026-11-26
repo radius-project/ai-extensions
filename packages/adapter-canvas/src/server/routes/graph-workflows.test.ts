@@ -587,7 +587,7 @@ describe("graph planning workflows", () => {
       expect(outcome.status).toBe(200);
       expect(outcome.payload).toEqual({
         error:
-          "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.",
+          "Copilot is generating .radius/app.bicep with the radius-app-model skill.",
         needsAppBicep: true,
         repo: "octo/app",
         branch: "main"
@@ -604,7 +604,7 @@ describe("graph planning workflows", () => {
       expect(messages(harness.state)).toEqual([
         "Checking octo/app for .radius/app.bicep.",
         "No application model exists yet.",
-        "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
+        "Copilot is creating .radius/app.bicep with the radius-app-model skill."
       ]);
     });
 
@@ -1285,7 +1285,7 @@ describe("graph planning workflows", () => {
       expect(messages(harness.state)).toEqual([
         "Checking octo/app for .radius/app.bicep.",
         "No application model exists yet.",
-        "Copilot is creating .radius/app.bicep with the Radius app-bicep skill.",
+        "Copilot is creating .radius/app.bicep with the radius-app-model skill.",
         UNSUPPORTED_NO_DOCKERFILE_MESSAGE
       ]);
     });
@@ -1886,7 +1886,7 @@ describe("graph planning workflows", () => {
       expect(outcome.status).toBe(200);
       expect(outcome.payload).toEqual({
         error:
-          "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.",
+          "Copilot is generating .radius/app.bicep with the radius-app-model skill.",
         needsAppBicep: true,
         repo: "octo/app",
         branch: "main"
@@ -2602,7 +2602,7 @@ describe("graph planning workflows", () => {
       // No `branch` key, unlike the single-branch routes.
       expect(outcome.payload).toEqual({
         error:
-          "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.",
+          "Copilot is generating .radius/app.bicep with the radius-app-model skill.",
         needsAppBicep: true,
         repo: "octo/app"
       });

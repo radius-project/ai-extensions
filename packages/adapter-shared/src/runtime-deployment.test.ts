@@ -282,6 +282,87 @@ describe("panel-independent deployment runtime", () => {
     }
   );
 
+  it.each([
+    [
+      "refusal",
+      async () => ({ status: 409 as const, error: "Model not ready." }),
+      409,
+      "Model not ready."
+    ],
+    [
+      "failure",
+      async () => {
+        throw new Error("fixture-private");
+      },
+      503,
+      "Could not check the deployment target: [redacted]"
+    ],
+    [
+      "non-Error failure",
+      async () => {
+        throw "fixture-private";
+      },
+      503,
+      "Could not check the deployment target: [redacted]"
+    ]
+  ])(
+    "returns a target check %s on the selected target without starting work",
+    async (_label, checkTarget, status, error) => {
+      const h = fixture({
+        delivery: {
+          redactDiagnostic: (text) =>
+            text.replaceAll("fixture-private", "[redacted]"),
+          reportDiagnostic: vi.fn()
+        }
+      });
+      const check = vi.fn(checkTarget);
+      const result = await h.runtime.start(
+        { ...target, branch: "", appFile: undefined },
+        {
+          modelSelection: {
+            resolve: async () => "app.bicep",
+            isCurrent: () => true
+          },
+          checkTarget: check
+        }
+      );
+      expect(result).toEqual({ ok: false, status, error });
+      expect(check).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ branch: "release", appFile: "app.bicep" })
+      );
+      expect(h.createExecution).not.toHaveBeenCalled();
+      expect(h.runtime.owner.hasActiveWork()).toBe(false);
+    }
+  );
+
+  it("refuses a target whose admission ended while it was checked", async () => {
+    const h = fixture();
+    const result = await h.runtime.start(target, {
+      checkTarget: async () => {
+        void h.runtime.owner.shutdown(0);
+        return undefined;
+      }
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      status: 409,
+      error: expect.stringContaining("changed while checking its target")
+    });
+    expect(h.createExecution).not.toHaveBeenCalled();
+  });
+
+  it("checks the target only after it is valid", async () => {
+    const h = fixture();
+    const checkTarget = vi.fn(async () => undefined);
+    expect(
+      await h.runtime.start({ ...target, provider: "aws" }, { checkTarget })
+    ).toMatchObject({ ok: false, status: 400 });
+    expect(checkTarget).not.toHaveBeenCalled();
+    const admitted = await h.runtime.start(target, { checkTarget });
+    expect(admitted.ok).toBe(true);
+    expect(checkTarget).toHaveBeenCalledOnce();
+  });
+
   it("never replaces an explicit file using host model selection", async () => {
     const h = fixture();
     const resolve = vi.fn(async () => "other.bicep");

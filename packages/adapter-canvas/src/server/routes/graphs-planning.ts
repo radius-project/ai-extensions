@@ -1022,7 +1022,7 @@ export async function handleLoadGraphStream(
       // to honour a recorded appModelAuthoringFailure, or a permanently failed
       // model will request generation on every reconnect.
       sendDone({
-        error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
+        error: `Copilot is generating .radius/app.bicep with the radius-app-model skill.`,
         needsAppBicep: true,
         repo,
         branch
