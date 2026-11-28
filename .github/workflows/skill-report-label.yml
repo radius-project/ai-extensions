@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+---
+name: Skill report label
+
+# Labels a new issue `reported-by-skill` when its body contains the marker line
+# that the radius-report-issue skill writes at the end of the "Version and
+# environment" section. The skill cannot set the label itself: GitHub drops
+# labels from a new issue when the author has no push access, but this
+# workflow's token can label any issue.
+#
+# Anyone can copy the marker into a manual report, so the label shows how an
+# issue claims it was filed, not proof that the skill filed it. The issue body
+# is untrusted: it reaches the script only through an environment variable and
+# is matched as data, never interpolated or evaluated.
+on:
+  issues:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  label:
+    name: Label skill reports
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Find the skill report marker
+        id: marker
+        shell: bash
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          marker='^Reported with: radius-report-issue skill, Radius plugin [^[:space:]]+[[:space:]]*$'
+          if grep -Eq "$marker" <<<"$ISSUE_BODY"; then
+            echo "found=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "found=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Add the reported-by-skill label
+        if: steps.marker.outputs.found == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/labels" \
+            -f "labels[]=reported-by-skill" >/dev/null

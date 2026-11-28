@@ -45,6 +45,14 @@ The destination is **`radius-project/ai-extensions`**, not the application's rep
 
 For a YAML issue form, render every field as a `### Label` heading in its original order. Keep all fields. Fill required fields with established facts; ask the user if a required fact is missing. Write `N/A`, `unknown`, or an explicit evidence gap for other fields as appropriate. Put sanitized logs in a fenced code block. Use a short title that names the failed stage and symptom without identifiers. Use the template's `bug` label. Put session, model, reasoning and version details under `Version and environment`.
 
+End the `Version and environment` section with this line. Replace `<version>` with the Radius plugin version you recorded, or with `unknown` when it cannot be established:
+
+```text
+Reported with: radius-report-issue skill, Radius plugin <version>
+```
+
+Write the line once, as plain text on its own line: not in a code block, quote, or HTML comment. It tells maintainers that this skill prepared the report. GitHub drops labels from a new issue when the author has no push access, so the line, not a label, identifies the report; a repository workflow labels issues that contain it. Keep the line in every revision of the draft so that the user reviews and approves it with the rest of the body.
+
 Show the complete title, destination, labels, and body to the user in a reviewable draft. A draft is local review content, not a GitHub issue. Do not call `create_issue`, submit an issue form, upload attachments, or use `gh issue create` at this stage. Let the user change the draft and repeat the privacy review after each edit.
 
 ## Require explicit submission permission
