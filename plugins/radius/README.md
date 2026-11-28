@@ -48,7 +48,7 @@ set up cloud credentials for Azure
 deploy my app
 ```
 
-When a Radius operation fails and recovery stops, Copilot offers to prepare an issue for the Radius team in `radius-project/ai-extensions`. If you agree, it collects relevant diagnostics, removes personal data and secrets, and records known session settings, model, reasoning level, and versions. You can review and change the complete draft. Copilot asks for separate explicit permission before it submits the issue. Declining the offer creates no report.
+When a Radius operation fails and recovery stops, Copilot offers to prepare an issue for the Radius team in `radius-project/ai-extensions`. If you agree, it collects relevant diagnostics, removes personal data and secrets, and records known session settings, model, reasoning level, and versions. The draft ends its version details with a `Reported with: radius-report-issue skill` line, so the Radius team can tell how the issue was filed. You can review and change the complete draft. Copilot asks for separate explicit permission before it submits the issue. Declining the offer creates no report.
 
 ## Source
 

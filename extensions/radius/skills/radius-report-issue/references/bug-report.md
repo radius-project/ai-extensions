@@ -31,3 +31,9 @@ Include only reviewed, sanitized output in a fenced code block. Do not upload ra
 ### Version and environment
 
 Include version, source commit, OS, Node.js, Copilot CLI or app version, cloud provider, and relevant session settings. Use `unknown` for unavailable facts.
+
+End the section with this line on its own, as plain text. Replace `<version>` with the Radius plugin version, or with `unknown` when it is unavailable:
+
+```text
+Reported with: radius-report-issue skill, Radius plugin <version>
+```
